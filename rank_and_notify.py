@@ -12,6 +12,7 @@ import asyncio
 import html
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -32,6 +33,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 TOP_N = 5
 MAX_GEMINI_CANDIDATES = int(os.getenv("MAX_GEMINI_CANDIDATES", "60"))
+SUMMARY_WORD_LIMIT = int(os.getenv("SUMMARY_WORD_LIMIT", "18"))
 
 # ─────────────────────────────────────────────────────────────
 # SCRAPER
@@ -45,7 +47,7 @@ from scraper import main as run_scraper
 
 class RankedTweet(BaseModel):
     id: str = Field(description="The ID of the tweet")
-    summary: str = Field(description="A concise, factual summary of the AI development in English")
+    summary: str = Field(description="A short factual summary, no more than 18 words")
 
 class RankingResponse(BaseModel):
     top_tweets: list[RankedTweet] = Field(description="List of top 5 tweets ranked by importance/impact of the AI development")
@@ -61,6 +63,24 @@ def _candidate_payload(tweet: dict) -> str:
         f"Date: {tweet['created']}\n"
         f"Text: {text}\n"
     )
+
+
+def shorten_summary(text: str, word_limit: int = SUMMARY_WORD_LIMIT) -> str:
+    """Keep Telegram summaries compact even if the model gets chatty."""
+    text = " ".join((text or "").split())
+    if not text:
+        return ""
+
+    sentence_match = re.match(r"^(.+?[.!?])(?:\s|$)", text)
+    if sentence_match:
+        text = sentence_match.group(1)
+
+    words = text.split()
+    if len(words) <= word_limit:
+        return text
+
+    clipped = " ".join(words[:word_limit]).rstrip(".,;:")
+    return f"{clipped}..."
 
 def rank_with_gemini(tweets: list[dict]) -> list[tuple[dict, str]]:
     """Rank tweets using Gemini AI and return a list of tuples containing (tweet_dict, summary)."""
@@ -89,7 +109,7 @@ Selection rules:
 - Prefer recent, specific updates over older viral tweets.
 - Do not choose more than one tweet about the same underlying development.
 
-For each selected tweet, write one concise sentence explaining what happened and why it matters. Keep summaries factual and avoid hype.
+For each selected tweet, write one short sentence of 12-18 words. No second sentence. No hype.
 
 Candidate tweets:
 {tweets_text}
@@ -111,7 +131,7 @@ Candidate tweets:
         
         for rt in data.get("top_tweets", []):
             tweet_id_str = str(rt.get("id")).strip()
-            summary = rt.get("summary", "")
+            summary = shorten_summary(rt.get("summary", ""))
             if tweet_id_str in tweets_map:
                 ranked_list.append((tweets_map[tweet_id_str], summary))
             else:
@@ -173,7 +193,7 @@ def detect_chat_id() -> str | None:
 def format_message(rank: int, tweet: dict, summary: str) -> str:
     author  = tweet["author"]
     url     = tweet["url"]
-    body    = html.escape(summary)
+    body    = html.escape(shorten_summary(summary))
     return f"<b>{rank}.</b>  @{author}\n{body}\n\n{url}"
 
 
