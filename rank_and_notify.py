@@ -31,6 +31,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 TOP_N = 5
+MAX_GEMINI_CANDIDATES = int(os.getenv("MAX_GEMINI_CANDIDATES", "60"))
 
 # ─────────────────────────────────────────────────────────────
 # SCRAPER
@@ -44,10 +45,22 @@ from scraper import main as run_scraper
 
 class RankedTweet(BaseModel):
     id: str = Field(description="The ID of the tweet")
-    summary: str = Field(description="A clean, professional summary of the development/news in English")
+    summary: str = Field(description="A concise, factual summary of the AI development in English")
 
 class RankingResponse(BaseModel):
     top_tweets: list[RankedTweet] = Field(description="List of top 5 tweets ranked by importance/impact of the AI development")
+
+
+def _candidate_payload(tweet: dict) -> str:
+    text = " ".join(tweet["text"].split())
+    if len(text) > 500:
+        text = text[:497].rstrip() + "..."
+    return (
+        f"ID: {tweet['id']}\n"
+        f"Author: @{tweet['author']}\n"
+        f"Date: {tweet['created']}\n"
+        f"Text: {text}\n"
+    )
 
 def rank_with_gemini(tweets: list[dict]) -> list[tuple[dict, str]]:
     """Rank tweets using Gemini AI and return a list of tuples containing (tweet_dict, summary)."""
@@ -62,19 +75,23 @@ def rank_with_gemini(tweets: list[dict]) -> list[tuple[dict, str]]:
 
     client = genai.Client(api_key=api_key)
 
-    # Format the tweets for the model prompt
-    tweets_text = ""
-    for t in tweets:
-        tweets_text += f"- ID: {t['id']} | Author: @{t['author']} | Likes: {t['likes']} | RTs: {t['retweets']}\nText: {t['text']}\n\n"
+    candidates = tweets[:MAX_GEMINI_CANDIDATES]
+    tweets_text = "\n".join(_candidate_payload(t) for t in candidates)
 
     prompt = f"""
-You are an expert AI researcher and tech journalist.
-Below is a list of tweets collected from X/Twitter about recent AI developments and news.
-Analyze them and select the top 5 most important and impactful AI news developments.
-Avoid duplicate developments (e.g. multiple tweets talking about the same release).
-For each selected tweet, write a clean, professional, and engaging summary (1-2 sentences) of the announcement/development in English.
+You are curating a concise AI news digest for builders and researchers.
 
-Tweets list:
+Select exactly {TOP_N} tweets that are the most useful AI developments from the candidate list.
+
+Selection rules:
+- Prefer concrete AI releases, model updates, benchmarks, research results, product launches, safety/security findings, and developer tooling.
+- Reject off-topic politics, tragedy, generic opinions, memes, engagement bait, personal updates without technical/news value, and duplicates.
+- Prefer recent, specific updates over older viral tweets.
+- Do not choose more than one tweet about the same underlying development.
+
+For each selected tweet, write one concise sentence explaining what happened and why it matters. Keep summaries factual and avoid hype.
+
+Candidate tweets:
 {tweets_text}
 """
 
@@ -175,7 +192,7 @@ async def main():
 
     # 1. Scrape
     print("\n[1/3] Scraping tweets...")
-    tweets = await run_scraper()
+    tweets = await run_scraper(verbose=True)
     if not tweets:
         print("  [!] No tweets returned. Exiting.")
         return

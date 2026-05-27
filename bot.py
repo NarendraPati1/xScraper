@@ -37,6 +37,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -73,7 +74,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         # 1. Scrape
         log.info(f"Running scraper for chat_id={chat_id}")
-        tweets = await run_scraper()
+        tweets = await run_scraper(verbose=False)
 
         if not tweets:
             await context.bot.send_message(chat_id=chat_id, text="No tweets found. Try again later.")

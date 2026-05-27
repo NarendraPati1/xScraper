@@ -18,7 +18,8 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from dotenv import load_dotenv
 
@@ -186,15 +187,31 @@ AI_ACCOUNTS = [
 
 # Search queries for latest AI news
 SEARCH_QUERIES = [
-    "AI model release lang:en min_faves:50",
-    "LLM benchmark new lang:en min_faves:30",
-    "new AI paper released lang:en",
-    "GPT OR Claude OR Gemini OR Llama release",
+    '"AI model release" OR "LLM release" OR "new AI model" lang:en min_faves:50 -filter:replies',
+    '"frontier model" OR "open weights" OR "model benchmark" lang:en min_faves:30 -filter:replies',
+    '"AI paper" OR "research paper" OR arxiv lang:en min_faves:20 -filter:replies',
+    'GPT OR Claude OR Gemini OR Llama OR Mistral release lang:en min_faves:30 -filter:replies',
 ]
 
 # Minimum engagement to filter noise
 MIN_FAVORITES = 20
 MAX_TWEETS_PER_QUERY = 10   # twikit max is 20 per call
+RECENT_DAYS = int(os.getenv("RECENT_DAYS", "21"))
+SAVE_TWEETS_JSON = os.getenv("SAVE_TWEETS_JSON", "0").lower() in {"1", "true", "yes"}
+
+AI_KEYWORDS = {
+    "ai", "artificial intelligence", "llm", "gpt", "chatgpt", "openai",
+    "claude", "anthropic", "gemini", "deepmind", "llama", "mistral",
+    "hugging face", "huggingface", "model", "benchmark", "eval",
+    "inference", "agent", "agents", "codex", "transformer", "token",
+    "reasoning", "multimodal", "weights", "dataset", "arxiv", "paper",
+    "research", "fine-tune", "finetune", "safety", "alignment",
+}
+
+NOISE_KEYWORDS = {
+    "epstein", "trump", "congressman", "mosque", "shooting", "election",
+    "senate", "war", "gaza", "ukraine",
+}
 
 
 # ─────────────────────────────────────────────
@@ -211,8 +228,6 @@ def format_tweet(tweet) -> dict:
         "text":      source.text,
         "likes":     source.favorite_count,
         "retweets":  source.retweet_count,
-        "replies":   source.reply_count,
-        "views":     source.view_count,
         "created":   source.created_at,
         "url":       f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
     }
@@ -226,73 +241,122 @@ def print_tweet(t: dict, index: int):
     print(f"    {t['url']}")
 
 
+def created_datetime(tweet: dict) -> datetime | None:
+    try:
+        return parsedate_to_datetime(tweet["created"])
+    except Exception:
+        return None
+
+
+def is_recent(tweet: dict, days: int = RECENT_DAYS) -> bool:
+    created = created_datetime(tweet)
+    if created is None:
+        return True
+    return (datetime.now(timezone.utc) - created).days <= days
+
+
+def ai_relevance_score(tweet: dict) -> int:
+    text = f"{tweet['author']} {tweet['text']}".lower()
+    if any(keyword in text for keyword in NOISE_KEYWORDS):
+        return 0
+    return sum(1 for keyword in AI_KEYWORDS if keyword in text)
+
+
+def should_keep_tweet(tweet: dict) -> bool:
+    return is_recent(tweet) and ai_relevance_score(tweet) > 0
+
+
+def print_tweet_summary(tweet: dict, index: int) -> None:
+    print(f"\n[{index}] @{tweet['author']}  -  {tweet['created']}")
+    print(f"    {tweet['text'][:200]}{'...' if len(tweet['text']) > 200 else ''}")
+    print(f"    {tweet['url']}")
+
+
 # ─────────────────────────────────────────────
 # MAIN SCRAPER
 # ─────────────────────────────────────────────
 
-async def main():
+async def main(verbose: bool = True, save_json: bool | None = None):
     client = Client("en-US")
+    save_json = SAVE_TWEETS_JSON if save_json is None else save_json
 
     # ── Login or reuse saved cookies ──────────
     if os.path.exists(COOKIES_FILE):
-        print(f"[+] Loading saved cookies from {COOKIES_FILE}")
+        if verbose:
+            print(f"[+] Loading saved cookies from {COOKIES_FILE}")
         client.load_cookies(COOKIES_FILE)
     else:
-        print("[+] No cookies found — logging in...")
+        if verbose:
+            print("[+] No cookies found; logging in...")
         await client.login(
             auth_info_1=TWITTER_USERNAME,
             auth_info_2=TWITTER_EMAIL,
             password=TWITTER_PASSWORD,
         )
         client.save_cookies(COOKIES_FILE)
-        print(f"[+] Cookies saved to {COOKIES_FILE}")
+        if verbose:
+            print(f"[+] Cookies saved to {COOKIES_FILE}")
 
     all_tweets = {}   # keyed by tweet ID to auto-deduplicate
 
     # ── 1. Search queries ──────────────────────
-    print("\n[+] Running search queries...")
+    if verbose:
+        print("\n[+] Running search queries...")
     for query in SEARCH_QUERIES:
-        print(f"    Searching: {query}")
+        if verbose:
+            print(f"    Searching: {query}")
         try:
             results = await client.search_tweet(query, "Latest", count=MAX_TWEETS_PER_QUERY)
             for tweet in results:
                 t = format_tweet(tweet)
-                if t["likes"] >= MIN_FAVORITES and t["id"] not in all_tweets:
+                if t["likes"] >= MIN_FAVORITES and should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Query failed: {e}")
         await asyncio.sleep(2)   # be polite between requests
 
     # ── 2. Account timelines ──────────────────
-    print("\n[+] Fetching account timelines...")
+    if verbose:
+        print("\n[+] Fetching account timelines...")
     for username in AI_ACCOUNTS:
-        print(f"    @{username}")
+        if verbose:
+            print(f"    @{username}")
         try:
             user = await client.get_user_by_screen_name(username)
             tweets = await client.get_user_tweets(user.id, "Tweets", count=5)
             for tweet in tweets:
                 t = format_tweet(tweet)
-                if t["id"] not in all_tweets:
+                if should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Failed for @{username}: {e}")
         await asyncio.sleep(1.5)
 
     # ── Results ───────────────────────────────
-    tweets_list = sorted(all_tweets.values(), key=lambda x: x["likes"], reverse=True)
+    tweets_list = sorted(
+        all_tweets.values(),
+        key=lambda x: (
+            ai_relevance_score(x),
+            created_datetime(x) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
 
-    print(f"\n{'='*60}")
-    print(f"  Found {len(tweets_list)} unique AI tweets")
-    print(f"{'='*60}")
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"  Found {len(tweets_list)} unique AI tweets")
+        print(f"{'='*60}")
 
-    for i, t in enumerate(tweets_list[:20], 1):
-        print_tweet(t, i)
+        for i, t in enumerate(tweets_list[:20], 1):
+            print_tweet_summary(t, i)
 
     # ── Save to JSON ──────────────────────────
-    output_file = f"ai_tweets_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(tweets_list, f, indent=2, ensure_ascii=False)
-    print(f"\n[+] Full results saved to {output_file}")
+    if save_json:
+        output_file = f"ai_tweets_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(tweets_list, f, indent=2, ensure_ascii=False)
+        if verbose:
+            print(f"\n[+] Full results saved to {output_file}")
 
     return tweets_list
 
