@@ -108,6 +108,57 @@ except Exception:
 
 from twikit import Client
 
+# X sometimes omits optional user fields from GraphQL responses. Twikit 2.3.3
+# treats some of them as required, which can drop otherwise valid tweets.
+try:
+    import twikit.user as _user_mod
+
+    def _patched_user_init(self, client, data):
+        self._client = client
+        legacy = data.get("legacy") or {}
+        entities = legacy.get("entities") or {}
+        description_entities = entities.get("description") or {}
+        url_entities = entities.get("url") or {}
+
+        self.id = data.get("rest_id") or data.get("id") or legacy.get("id_str", "")
+        self.created_at = legacy.get("created_at", "")
+        self.name = legacy.get("name", "")
+        self.screen_name = legacy.get("screen_name", "")
+        self.profile_image_url = legacy.get("profile_image_url_https", "")
+        self.profile_banner_url = legacy.get("profile_banner_url")
+        self.url = legacy.get("url")
+        self.location = legacy.get("location", "")
+        self.description = legacy.get("description", "")
+        self.description_urls = description_entities.get("urls", [])
+        self.urls = url_entities.get("urls", [])
+        self.pinned_tweet_ids = legacy.get("pinned_tweet_ids_str", [])
+        self.is_blue_verified = data.get("is_blue_verified", False)
+        self.verified = legacy.get("verified", False)
+        self.possibly_sensitive = legacy.get("possibly_sensitive", False)
+        self.can_dm = legacy.get("can_dm", False)
+        self.can_media_tag = legacy.get("can_media_tag", False)
+        self.want_retweets = legacy.get("want_retweets", False)
+        self.default_profile = legacy.get("default_profile", False)
+        self.default_profile_image = legacy.get("default_profile_image", False)
+        self.has_custom_timelines = legacy.get("has_custom_timelines", False)
+        self.followers_count = legacy.get("followers_count", 0)
+        self.fast_followers_count = legacy.get("fast_followers_count", 0)
+        self.normal_followers_count = legacy.get("normal_followers_count", 0)
+        self.following_count = legacy.get("friends_count", 0)
+        self.favourites_count = legacy.get("favourites_count", 0)
+        self.listed_count = legacy.get("listed_count", 0)
+        self.media_count = legacy.get("media_count", 0)
+        self.statuses_count = legacy.get("statuses_count", 0)
+        self.is_translator = legacy.get("is_translator", False)
+        self.translator_type = legacy.get("translator_type", "")
+        self.profile_interstitial_type = legacy.get("profile_interstitial_type", "")
+        self.withheld_in_countries = legacy.get("withheld_in_countries", [])
+        self.protected = legacy.get("protected", False)
+
+    _user_mod.User.__init__ = _patched_user_init
+except Exception:
+    pass
+
 load_dotenv()
 
 # Reconfigure stdout to support unicode/emojis in Windows console
