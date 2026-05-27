@@ -33,6 +33,79 @@ try:
 except Exception:
     pass  # If patch fails, proceed normally and hope for the best
 
+# Broader twikit compatibility patch for newer X responsive-web chunks.
+try:
+    import twikit.x_client_transaction.transaction as _tx_mod
+
+    _tx_mod.ON_DEMAND_FILE_REGEX = re.compile(
+        r"""['|\"]{1}ondemand\.s['|\"]{1}:\s*['|\"]{1}([\w]*)['|\"]{1}""",
+        flags=(re.VERBOSE | re.MULTILINE),
+    )
+
+    async def _patched_get_indices(self, home_page_response, session, headers):
+        response = self.validate_response(home_page_response) or self.home_page_response
+        response_text = str(response)
+        ondemand_urls = []
+
+        ondemand_urls.extend(
+            re.findall(
+                r"https://abs\.twimg\.com/responsive-web/client-web/ondemand\.s\.[^\"']+?\.js",
+                response_text,
+            )
+        )
+
+        direct_hashes = re.findall(r"ondemand\.s\.([a-zA-Z0-9_-]+?)a?\.js", response_text)
+        ondemand_urls.extend(
+            f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{chunk_hash}a.js"
+            for chunk_hash in direct_hashes
+        )
+
+        legacy_match = _tx_mod.ON_DEMAND_FILE_REGEX.search(response_text)
+        if legacy_match:
+            ondemand_urls.append(
+                f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{legacy_match.group(1)}a.js"
+            )
+
+        chunk_id_matches = re.findall(r"(\d+):[\"']ondemand\.s[\"']", response_text)
+        for chunk_id in chunk_id_matches:
+            hash_match = re.search(rf"\b{chunk_id}:[\"']([a-zA-Z0-9_-]+)[\"']", response_text)
+            if hash_match:
+                ondemand_urls.append(
+                    f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash_match.group(1)}a.js"
+                )
+
+        seen = set()
+        for ondemand_url in ondemand_urls:
+            if ondemand_url in seen:
+                continue
+            seen.add(ondemand_url)
+            ondemand_response = await session.request(method="GET", url=ondemand_url, headers=headers)
+            key_byte_indices = [
+                int(match.group(1))
+                for match in re.finditer(r"\(\w{1,3}\[(\d{1,2})\],\s*16\)", ondemand_response.text)
+            ]
+            if key_byte_indices:
+                return key_byte_indices[0], key_byte_indices[1:]
+
+        raise Exception("Couldn't get KEY_BYTE indices")
+
+    _original_init = _tx_mod.ClientTransaction.init
+
+    async def _patched_init(self, session, headers):
+        try:
+            await _original_init(self, session, headers)
+        except Exception:
+            self.home_page_response = None
+            self.key = None
+            self.key_bytes = None
+            self.animation_key = None
+            raise
+
+    _tx_mod.ClientTransaction.get_indices = _patched_get_indices
+    _tx_mod.ClientTransaction.init = _patched_init
+except Exception:
+    pass  # If patch fails, proceed normally and let twikit report the error.
+
 from twikit import Client
 
 load_dotenv()
