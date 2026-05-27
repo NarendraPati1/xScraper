@@ -22,8 +22,8 @@ import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 # ── local modules ──────────────────────────────────────────
 from scraper import main as run_scraper
@@ -40,6 +40,14 @@ log = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Get AI Digest")],
+        [KeyboardButton("Help")],
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Choose an action",
+)
 
 # ─────────────────────────────────────────────────────────────
 # COMMAND HANDLERS
@@ -110,6 +118,34 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "<b>AI News Bot</b>\n\n"
+        "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X, ranked and summarized.",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "<b>Commands</b>\n"
+        "/update - fetch the latest AI digest\n"
+        "/start - show action buttons\n"
+        "/help - show this help",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (update.message.text or "").strip().lower()
+    if text == "get ai digest":
+        await cmd_update(update, context)
+    elif text == "help":
+        await cmd_help(update, context)
+
+
 # ─────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────
@@ -122,6 +158,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
 
     log.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
