@@ -65,6 +65,19 @@ def _seed_transaction(ct: tx_mod.ClientTransaction) -> bool:
 
 # ── End patch ────────────────────────────────────────
 
+# ── Tweet property safety patch ──────────────────────
+# twikit Tweet uses hard bracket access on legacy fields
+# (e.g. legacy['favorite_count']) which raises KeyError when
+# the Twitter API omits those fields, causing tweet_from_data
+# to silently drop every result. Patch them to use .get().
+from twikit.tweet import Tweet as _Tweet
+
+_Tweet.favorite_count = property(lambda self: self._legacy.get('favorite_count', 0))
+_Tweet.favorited      = property(lambda self: self._legacy.get('favorited', False))
+_Tweet.reply_count    = property(lambda self: self._legacy.get('reply_count', 0))
+_Tweet.retweet_count  = property(lambda self: self._legacy.get('retweet_count', 0))
+# ── End tweet patch ──────────────────────────────────
+
 # Reconfigure stdout to support unicode/emojis in Windows console
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -97,8 +110,12 @@ SEARCH_QUERIES = [
 ]
 
 # Minimum engagement to filter noise
-MIN_FAVORITES = 20
+# (Twitter's min_faves: operator in the query already handles filtering;
+#  this is a safety floor — set to 0 to avoid dropping tweets where the
+#  API doesn't return favorite_count in the response payload)
+MIN_FAVORITES = 0
 MAX_TWEETS_PER_QUERY = 10   # twikit max is 20 per call
+
 
 
 # ─────────────────────────────────────────────
@@ -113,13 +130,14 @@ def format_tweet(tweet) -> dict:
         "id":        source.id,
         "author":    source.user.screen_name,
         "text":      source.text,
-        "likes":     source.favorite_count,
-        "retweets":  source.retweet_count,
-        "replies":   source.reply_count,
-        "views":     source.view_count,
+        "likes":     source.favorite_count or 0,
+        "retweets":  source.retweet_count or 0,
+        "replies":   source.reply_count or 0,
+        "views":     source.view_count or 0,
         "created":   source.created_at,
         "url":       f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
     }
+
 
 
 def print_tweet(t: dict, index: int):
