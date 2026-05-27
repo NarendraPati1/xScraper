@@ -6,6 +6,7 @@ Telegram bot that responds to /update with a fresh AI news digest.
 Commands:
     /start  — welcome message
     /update — scrape and send top 5 AI tweets
+    /more   — get next 5 tweets
 
 Run locally:
     python bot.py
@@ -40,11 +41,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # ─────────────────────────────────────────────────────────────
 # CACHE  (30-minute in-memory result store)
 # ─────────────────────────────────────────────────────────────
-CACHE_MINUTES    = 30
-_cache_lock      = asyncio.Lock()
-_cached_results  = None   # list of (tweet, summary) tuples — top 5 (Gemini ranked)
-_cached_extra    = None   # list of (tweet, text) tuples  — next 5 by likes
-_cached_at       = None   # datetime of last successful scrape
+CACHE_MINUTES     = 30
+MORE_PAGE_SIZE    = 5        # tweets per "More" press
+
+_cache_lock       = asyncio.Lock()
+_cached_results   = None    # list of (tweet, summary) — top 5, Gemini ranked
+_cached_more_pool = None    # list of tweet dicts — everything else, sorted by likes
+_cached_at        = None    # datetime of last successful scrape
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -59,20 +62,24 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 # ─────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["more_offset"] = 0
     await update.message.reply_text(
         "<b>AI News Bot</b>\n\n"
         "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X.\n"
-        "Tap <b>More</b> to see additional tweets.",
+        "Tap <b>More</b> to keep browsing more tweets.",
         parse_mode="HTML",
         reply_markup=MAIN_KEYBOARD,
     )
 
 
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global _cached_results, _cached_extra, _cached_at
+    global _cached_results, _cached_more_pool, _cached_at
 
     chat_id = update.effective_chat.id
     user    = update.effective_user.first_name or "there"
+
+    # Reset this user's More pagination
+    context.user_data["more_offset"] = 0
 
     # ── Serve from cache if fresh ──────────────────────────────
     now = datetime.now()
@@ -114,15 +121,15 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             log.info(f"Ranking {len(tweets)} tweets")
             top = rank_with_gemini(tweets)
 
-            # 3. Build "More" batch — next 5 tweets not already in top
+            # 3. Build "More" pool — all remaining tweets not in top, sorted by likes
             top_ids = {t["id"] for t, _ in top}
-            extra_tweets = [t for t in tweets if t["id"] not in top_ids][:5]
+            more_pool = [t for t in tweets if t["id"] not in top_ids]
 
             # 4. Store in cache
-            _cached_results = top
-            _cached_extra   = [(t, t["text"]) for t in extra_tweets]
-            _cached_at      = datetime.now()
-            log.info(f"Cache updated. Top={len(top)}, Extra={len(_cached_extra)}")
+            _cached_results   = top
+            _cached_more_pool = more_pool
+            _cached_at        = datetime.now()
+            log.info(f"Cache updated. Top={len(top)}, More pool={len(more_pool)} tweets available.")
 
             # 5. Send header + top 5
             await context.bot.send_message(
@@ -151,15 +158,28 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send the next 5 tweets that weren't in the main digest."""
+    """Send the next page of tweets from the More pool."""
     chat_id = update.effective_chat.id
 
-    if not _cached_extra:
+    if not _cached_more_pool:
         if not _cached_results:
-            await update.message.reply_text("No digest loaded yet. Tap Get AI Digest first.")
+            await update.message.reply_text("No digest loaded yet — tap Get AI Digest first.")
         else:
             await update.message.reply_text("No additional tweets available right now.")
         return
+
+    # Get this user's current offset into the pool
+    offset = context.user_data.get("more_offset", 0)
+    batch  = _cached_more_pool[offset : offset + MORE_PAGE_SIZE]
+
+    if not batch:
+        await update.message.reply_text(
+            f"You've seen all {len(_cached_more_pool) + len(_cached_results)} available tweets. "
+            "Tap Get AI Digest to load a fresh batch."
+        )
+        return
+
+    start_rank = len(_cached_results) + offset + 1  # e.g. 6, 11, 16 ...
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -167,16 +187,19 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="HTML",
     )
 
-    for rank, (tweet, text) in enumerate(_cached_extra, 6):
+    for i, tweet in enumerate(batch):
         await context.bot.send_message(
             chat_id=chat_id,
-            text=format_message(rank, tweet, text),
+            text=format_message(start_rank + i, tweet, tweet["text"]),
             parse_mode="HTML",
             disable_web_page_preview=False,
         )
         await asyncio.sleep(0.3)
 
-    log.info(f"Sent {len(_cached_extra)} extra tweets to chat_id={chat_id}")
+    # Advance this user's offset
+    context.user_data["more_offset"] = offset + len(batch)
+    remaining = len(_cached_more_pool) - context.user_data["more_offset"]
+    log.info(f"Sent More batch (offset {offset}→{context.user_data['more_offset']}) to chat_id={chat_id}. {remaining} left.")
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
