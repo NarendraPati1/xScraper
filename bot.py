@@ -5,21 +5,16 @@ Telegram bot that responds to /update with a fresh AI news digest.
 
 Commands:
     /start  — welcome message
-    /update — scrape, rank with Gemini, and send top 5 AI tweets
-    /help   — show available commands
+    /update — scrape and send top 5 AI tweets
 
 Run locally:
     python bot.py
-
-Deploy (Railway / Render / Fly.io):
-    See README or Dockerfile.
 """
 
 import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
@@ -43,10 +38,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Get AI Digest")],
-        [KeyboardButton("Help")],
     ],
     resize_keyboard=True,
-    input_field_placeholder="Choose an action",
+    input_field_placeholder="Tap to get today's AI digest",
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -55,19 +49,10 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "AI News Bot\n"
-        "────────────────────\n"
-        "Send /update to get the latest top 5 AI developments from X/Twitter,\n"
-        "ranked and summarised by Gemini AI.\n\n"
-        "/help for all commands."
-    )
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "/update — fetch and rank the latest AI tweets\n"
-        "/start  — introduction\n"
-        "/help   — this message"
+        "<b>AI News Bot</b>\n\n"
+        "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X.",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -76,7 +61,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user    = update.effective_user.first_name or "there"
 
     await update.message.reply_text(
-        f"On it, {user}. Scraping X and ranking with Gemini — this takes about 60 seconds..."
+        f"On it, {user}. Scraping X — this takes about 60 seconds..."
     )
 
     try:
@@ -89,7 +74,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         # 2. Rank + summarise
-        log.info(f"Ranking {len(tweets)} tweets with Gemini")
+        log.info(f"Ranking {len(tweets)} tweets")
         top = rank_with_gemini(tweets)
 
         # 3. Send header + individual messages
@@ -118,32 +103,10 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "<b>AI News Bot</b>\n\n"
-        "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X, ranked and summarized.",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "<b>Commands</b>\n"
-        "/update - fetch the latest AI digest\n"
-        "/start - show action buttons\n"
-        "/help - show this help",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip().lower()
     if text == "get ai digest":
         await cmd_update(update, context)
-    elif text == "help":
-        await cmd_help(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,7 +119,6 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
 
