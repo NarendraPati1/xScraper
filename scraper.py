@@ -22,6 +22,21 @@ from datetime import datetime
 from dotenv import load_dotenv
 from twikit import Client
 
+# Monkey patch twikit's ClientTransaction.init to avoid getting stuck in a half-initialized
+# state (which throws AttributeError: 'ClientTransaction' object has no attribute 'key') if the
+# handshake/fetch fails.
+import twikit.x_client_transaction.transaction as tx_mod
+original_init = tx_mod.ClientTransaction.init
+
+async def patched_init(self, session, headers):
+    try:
+        await original_init(self, session, headers)
+    except Exception as e:
+        self.home_page_response = None
+        raise e
+
+tx_mod.ClientTransaction.init = patched_init
+
 load_dotenv()
 
 # Reconfigure stdout to support unicode/emojis in Windows console
@@ -134,6 +149,7 @@ async def main():
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Query failed: {e}")
+            client.client_transaction.home_page_response = None
         await asyncio.sleep(2)   # be polite between requests
 
     # ── 2. Account timelines ──────────────────
@@ -149,6 +165,7 @@ async def main():
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Failed for @{username}: {e}")
+            client.client_transaction.home_page_response = None
         await asyncio.sleep(1.5)
 
     # ── Results ───────────────────────────────
