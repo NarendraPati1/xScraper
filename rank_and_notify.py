@@ -137,6 +137,69 @@ Candidate tweets:
         print(f"[!] Error ranking with Gemini: {e}")
         return [(t, t["text"]) for t in tweets[:TOP_N]]
 
+def summarize_tweets(tweets: list[dict]) -> dict[str, str]:
+    """Generate concise, scanable, factual English summaries for each input tweet using Gemini."""
+    if not tweets:
+        return {}
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {str(t["id"]): t["text"] for t in tweets}
+
+    client = genai.Client(api_key=api_key)
+    tweets_text = "\n".join(_candidate_payload(t) for t in tweets)
+
+    prompt = f"""
+You are summarizing AI news updates for builders and researchers.
+
+For each of the following tweets, write a short, Telegram-friendly summary. 
+Write all summaries in strict English, regardless of the language of the source tweet. 
+Keep it concise, factual, and easy to scan. No hype. Do not add intro/outro text.
+
+Tweets to summarize:
+{tweets_text}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=RankingResponse,
+            ),
+        )
+        
+        data = json.loads(response.text)
+        summary_map = {}
+        for rt in data.get("top_tweets", []):
+            tweet_id_str = str(rt.get("id")).strip()
+            summary = " ".join(rt.get("summary", "").split())
+            summary_map[tweet_id_str] = summary
+
+        # Ensure every tweet in the input has some entry (fallback to original text if missing)
+        result = {}
+        for t in tweets:
+            tid = str(t["id"])
+            if tid in summary_map:
+                result[tid] = summary_map[tid]
+            else:
+                # Fallback to fuzzy search or original text
+                matched = False
+                for k, v in summary_map.items():
+                    if k in tid or tid in k:
+                        result[tid] = v
+                        matched = True
+                        break
+                if not matched:
+                    result[tid] = t["text"]
+        return result
+
+    except Exception as e:
+        print(f"[!] Error summarizing with Gemini: {e}")
+        return {str(t["id"]): t["text"] for t in tweets}
+
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM
 # ─────────────────────────────────────────────────────────────

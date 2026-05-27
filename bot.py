@@ -24,7 +24,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 # ── local modules ──────────────────────────────────────────
 from scraper import main as run_scraper
-from rank_and_notify import rank_with_gemini, format_message, format_header
+from rank_and_notify import rank_with_gemini, format_message, format_header, summarize_tweets
 
 load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
@@ -181,6 +181,9 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     start_rank = len(_cached_results) + offset + 1  # e.g. 6, 11, 16 ...
 
+    # Generate summaries for the current batch
+    summaries = summarize_tweets(batch)
+
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"<b>More from X</b>  —  {datetime.now().strftime('%d %b %Y')}",
@@ -188,9 +191,10 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     for i, tweet in enumerate(batch):
+        summary = summaries.get(str(tweet["id"]), tweet["text"])
         await context.bot.send_message(
             chat_id=chat_id,
-            text=format_message(start_rank + i, tweet, tweet["text"]),
+            text=format_message(start_rank + i, tweet, summary),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
         )
