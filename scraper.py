@@ -21,28 +21,49 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from twikit import Client
-
-# ── Monkey Patch ──────────────────────────────────────────────
-# On cloud hosts (Render, Koyeb), Cloudflare blocks repeated GET
-# requests to x.com used to initialize the ClientTransaction.
-# We patch get_indices to SKIP the x.com fetch once the transaction
-# is already initialized, reusing the cached home_page_response.
 import twikit.x_client_transaction.transaction as tx_mod
-original_get_indices = tx_mod.ClientTransaction.get_indices
-
-async def patched_get_indices(self, home_page_response, session, headers):
-    """If already initialized, skip re-fetching x.com for indices."""
-    if (
-        self.DEFAULT_ROW_INDEX is not None
-        and self.DEFAULT_KEY_BYTES_INDICES is not None
-    ):
-        return self.DEFAULT_ROW_INDEX, self.DEFAULT_KEY_BYTES_INDICES
-    return await original_get_indices(self, home_page_response, session, headers)
-
-tx_mod.ClientTransaction.get_indices = patched_get_indices
-# ── End Patch ─────────────────────────────────────────────────
 
 load_dotenv()
+
+# ── Cloudflare-bypass patch ───────────────────────────
+# Render's IPs are blocked by Cloudflare on x.com, so the twikit
+# ClientTransaction can never fetch the KEY_BYTE indices it needs.
+# Fix: if TWITTER_TX_CACHE env var is set (JSON with pre-extracted
+# values from a local machine), inject them directly into the
+# transaction object at startup so x.com is never fetched.
+
+_TX_CACHE: dict | None = None
+_TX_CACHE_RAW = os.getenv("TWITTER_TX_CACHE", "")
+if _TX_CACHE_RAW:
+    try:
+        _TX_CACHE = json.loads(_TX_CACHE_RAW)
+        print("[+] Loaded TWITTER_TX_CACHE from environment.")
+    except Exception as e:
+        print(f"[!] Failed to parse TWITTER_TX_CACHE: {e}")
+
+
+def _seed_transaction(ct: tx_mod.ClientTransaction) -> bool:
+    """Pre-populate a ClientTransaction from the cached env values.
+    Returns True if seeding succeeded, False otherwise."""
+    if not _TX_CACHE:
+        return False
+    try:
+        import bs4
+        ct.DEFAULT_ROW_INDEX = _TX_CACHE["DEFAULT_ROW_INDEX"]
+        ct.DEFAULT_KEY_BYTES_INDICES = _TX_CACHE["DEFAULT_KEY_BYTES_INDICES"]
+        ct.key = _TX_CACHE["key"]
+        ct.key_bytes = _TX_CACHE["key_bytes"]
+        ct.animation_key = _TX_CACHE["animation_key"]
+        # home_page_response must be truthy so twikit skips re-init;
+        # use a minimal dummy BeautifulSoup object.
+        ct.home_page_response = bs4.BeautifulSoup("<html></html>", "lxml")
+        print("[+] Transaction pre-seeded from TWITTER_TX_CACHE.")
+        return True
+    except Exception as e:
+        print(f"[!] Failed to seed transaction: {e}")
+        return False
+
+# ── End patch ────────────────────────────────────────
 
 # Reconfigure stdout to support unicode/emojis in Windows console
 sys.stdout.reconfigure(encoding='utf-8')
@@ -152,6 +173,10 @@ async def get_client() -> Client:
         )
         client.save_cookies(COOKIES_FILE)
         print(f"[+] Cookies saved to {COOKIES_FILE}")
+
+    # ── Pre-seed ClientTransaction so x.com is never fetched ──
+    if not _seed_transaction(client.client_transaction):
+        print("[!] TWITTER_TX_CACHE not set. twikit will attempt to fetch x.com on first request.")
 
     _client = client
     return _client
