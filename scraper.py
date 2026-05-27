@@ -16,10 +16,23 @@ Setup (one-time):
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
+
+# ── Monkey-patch: fix 'ClientTransaction has no attribute key' ──
+# Twitter periodically changes ondemand.s.js structure, breaking twikit's
+# regex parser. This patch keeps things working until twikit releases a fix.
+try:
+    import twikit.x_client_transaction.transaction as _tx_mod
+    _tx_mod.ON_DEMAND_FILE_REGEX = re.compile(
+        r',(\d+):function\(\w+,\w+\)\{return "\w+"\}'
+    )
+except Exception:
+    pass  # If patch fails, proceed normally and hope for the best
+
 from twikit import Client
 
 load_dotenv()
