@@ -1,0 +1,11 @@
+# Sensitive files — never commit these
+.env
+cookies.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Output
+ai_tweets_*.json

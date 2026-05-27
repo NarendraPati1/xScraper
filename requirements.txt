@@ -1,0 +1,4 @@
+twikit
+python-dotenv
+python-telegram-bot
+requests
