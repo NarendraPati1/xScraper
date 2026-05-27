@@ -22,20 +22,25 @@ from datetime import datetime
 from dotenv import load_dotenv
 from twikit import Client
 
-# Monkey patch twikit's ClientTransaction.init to avoid getting stuck in a half-initialized
-# state (which throws AttributeError: 'ClientTransaction' object has no attribute 'key') if the
-# handshake/fetch fails.
+# ── Monkey Patch ──────────────────────────────────────────────
+# On cloud hosts (Render, Koyeb), Cloudflare blocks repeated GET
+# requests to x.com used to initialize the ClientTransaction.
+# We patch get_indices to SKIP the x.com fetch once the transaction
+# is already initialized, reusing the cached home_page_response.
 import twikit.x_client_transaction.transaction as tx_mod
-original_init = tx_mod.ClientTransaction.init
+original_get_indices = tx_mod.ClientTransaction.get_indices
 
-async def patched_init(self, session, headers):
-    try:
-        await original_init(self, session, headers)
-    except Exception as e:
-        self.home_page_response = None
-        raise e
+async def patched_get_indices(self, home_page_response, session, headers):
+    """If already initialized, skip re-fetching x.com for indices."""
+    if (
+        self.DEFAULT_ROW_INDEX is not None
+        and self.DEFAULT_KEY_BYTES_INDICES is not None
+    ):
+        return self.DEFAULT_ROW_INDEX, self.DEFAULT_KEY_BYTES_INDICES
+    return await original_get_indices(self, home_page_response, session, headers)
 
-tx_mod.ClientTransaction.init = patched_init
+tx_mod.ClientTransaction.get_indices = patched_get_indices
+# ── End Patch ─────────────────────────────────────────────────
 
 load_dotenv()
 
@@ -105,13 +110,26 @@ def print_tweet(t: dict, index: int):
 
 
 # ─────────────────────────────────────────────
-# MAIN SCRAPER
+# PERSISTENT CLIENT SINGLETON
 # ─────────────────────────────────────────────
+# We keep one Client instance alive for the entire process lifetime.
+# twikit's ClientTransaction fetches x.com once on the first request
+# to get KEY_BYTE indices. On cloud hosts, Cloudflare blocks repeated
+# fetches. By reusing the same client, x.com is only fetched once
+# at startup and the transaction is cached forever.
 
-async def main():
+_client: Client | None = None
+
+
+async def get_client() -> Client:
+    """Return (and lazily initialize) the persistent twikit Client."""
+    global _client
+    if _client is not None:
+        return _client
+
     client = Client("en-US")
 
-    # ── Login or reuse saved cookies ──────────
+    # ── Restore cookies ────────────────────────
     if not os.path.exists(COOKIES_FILE):
         env_cookies = os.getenv("TWITTER_COOKIES_JSON")
         if env_cookies:
@@ -135,6 +153,17 @@ async def main():
         client.save_cookies(COOKIES_FILE)
         print(f"[+] Cookies saved to {COOKIES_FILE}")
 
+    _client = client
+    return _client
+
+
+# ─────────────────────────────────────────────
+# MAIN SCRAPER
+# ─────────────────────────────────────────────
+
+async def main():
+    client = await get_client()
+
     all_tweets = {}   # keyed by tweet ID to auto-deduplicate
 
     # ── 1. Search queries ──────────────────────
@@ -149,7 +178,6 @@ async def main():
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Query failed: {e}")
-            client.client_transaction.home_page_response = None
         await asyncio.sleep(2)   # be polite between requests
 
     # ── 2. Account timelines ──────────────────
@@ -165,7 +193,6 @@ async def main():
                     all_tweets[t["id"]] = t
         except Exception as e:
             print(f"    [!] Failed for @{username}: {e}")
-            client.client_transaction.home_page_response = None
         await asyncio.sleep(1.5)
 
     # ── Results ───────────────────────────────
