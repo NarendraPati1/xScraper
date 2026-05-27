@@ -183,6 +183,14 @@ AI_ACCOUNTS = [
     "karpathy",
     "ylecun",
     "sama",               # Sam Altman
+    "DrJimFan",           # Jim Fan (NVIDIA AI)
+    "AndrewYNg",          # Andrew Ng
+    "demishassabis",      # Demis Hassabis (DeepMind)
+    "AlphaSignalAI",      # AlphaSignal (AI news)
+    "rowancheung",        # Rowan Cheung (AI news editor)
+    "AravSrinivas",       # Aravind Srinivas (Perplexity CEO)
+    "gdb",                # Greg Brockman (OpenAI Co-founder)
+    "ilyasut",            # Ilya Sutskever (SSI Co-founder)
 ]
 
 # Search queries for latest AI news
@@ -191,6 +199,9 @@ SEARCH_QUERIES = [
     '"frontier model" OR "open weights" OR "model benchmark" lang:en min_faves:30 -filter:replies',
     '"AI paper" OR "research paper" OR arxiv lang:en min_faves:20 -filter:replies',
     'GPT OR Claude OR Gemini OR Llama OR Mistral release lang:en min_faves:30 -filter:replies',
+    'agentic OR "AI agent" OR "autonomous agent" release lang:en min_faves:30 -filter:replies',
+    '"text-to-video" OR "generative video" OR "video model" OR "text-to-image" lang:en min_faves:40 -filter:replies',
+    '"multimodal model" OR "vision language model" OR "VLM" lang:en min_faves:30 -filter:replies',
 ]
 
 # Minimum engagement to filter noise
@@ -222,10 +233,23 @@ def format_tweet(tweet) -> dict:
     """Extract the fields we care about from a Tweet object."""
     # Unwrap retweets so we get the original content
     source = tweet.retweeted_tweet if tweet.retweeted_tweet else tweet
+    
+    text = source.text or ""
+    # Retrieve quote tweet if available
+    is_quote = getattr(source, "is_quote_status", False) or getattr(source, "is_quote", False)
+    quote_obj = getattr(source, "quote", None)
+    if is_quote and quote_obj:
+        quoted_text = quote_obj.text or ""
+        quoted_author = ""
+        if getattr(quote_obj, "user", None):
+            quoted_author = getattr(quote_obj.user, "screen_name", "") or getattr(quote_obj.user, "username", "")
+        if quoted_text:
+            text += f"\n\n[Quoted from @{quoted_author}]: {quoted_text}"
+
     return {
         "id":        source.id,
         "author":    source.user.screen_name,
-        "text":      source.text,
+        "text":      text,
         "likes":     source.favorite_count,
         "retweets":  source.retweet_count,
         "created":   source.created_at,
