@@ -5,23 +5,22 @@ Telegram bot that responds to /update with a fresh AI news digest.
 
 Commands:
     /start  — welcome message
-    /update — scrape, rank with Gemini, and send top 5 AI tweets
+    /update — scrape and send top 5 AI tweets
     /help   — show available commands
 
 Run locally:
     python bot.py
 
-Deploy (Railway / Render / Fly.io):
-    See README or Dockerfile.
+Deploy (Render):
+    Set RENDER_EXTERNAL_URL env var — bot auto-switches to webhook mode,
+    which eliminates 409 Conflicts during rolling deploys.
 """
 
 import asyncio
 import logging
 import os
 import sys
-import threading
 from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -47,6 +46,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+# Render sets RENDER_EXTERNAL_URL automatically (e.g. https://myapp.onrender.com).
+# When present, we use webhook mode — Telegram pushes updates to our URL,
+# no polling, no 409 Conflicts during rolling deploys.
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+WEBHOOK_PATH = "/webhook"
+PORT = int(os.getenv("PORT", "10000"))
 
 # ─────────────────────────────────────────────────────────────
 # COMMAND HANDLERS

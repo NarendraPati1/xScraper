@@ -78,6 +78,105 @@ _Tweet.reply_count    = property(lambda self: self._legacy.get('reply_count', 0)
 _Tweet.retweet_count  = property(lambda self: self._legacy.get('retweet_count', 0))
 # ── End tweet patch ──────────────────────────────────
 
+# ── User property safety patch ──────────────────────
+# Patches User.__init__ for both twikit.user.User and twikit.guest.user.User
+# to ensure missing or null fields in legacy/entities don't raise KeyErrors.
+import logging
+_patch_log = logging.getLogger("twikit_user_patch")
+
+def _patch_user_init(original_init):
+    def new_init(self, client, data, *args, **kwargs):
+        try:
+            if isinstance(data, dict):
+                # Ensure rest_id exists
+                if 'rest_id' not in data and 'id' in data:
+                    data['rest_id'] = data['id']
+                elif 'rest_id' not in data:
+                    data['rest_id'] = '0'
+
+                if 'is_blue_verified' not in data:
+                    data['is_blue_verified'] = False
+
+                legacy = data.get('legacy')
+                if not isinstance(legacy, dict):
+                    legacy = {}
+                    data['legacy'] = legacy
+
+                # Safe defaults for all possible keys in legacy
+                safe_defaults = {
+                    'created_at': '',
+                    'name': '',
+                    'screen_name': '',
+                    'profile_image_url_https': '',
+                    'location': '',
+                    'description': '',
+                    'pinned_tweet_ids_str': [],
+                    'verified': False,
+                    'possibly_sensitive': False,
+                    'default_profile': False,
+                    'default_profile_image': False,
+                    'has_custom_timelines': False,
+                    'followers_count': 0,
+                    'fast_followers_count': 0,
+                    'normal_followers_count': 0,
+                    'friends_count': 0,
+                    'favourites_count': 0,
+                    'listed_count': 0,
+                    'media_count': 0,
+                    'statuses_count': 0,
+                    'is_translator': False,
+                    'translator_type': '',
+                    'withheld_in_countries': [],
+                    'protected': False,
+                    'can_dm': False,
+                    'can_media_tag': False,
+                    'want_retweets': False,
+                }
+                for k, v in safe_defaults.items():
+                    if k not in legacy or legacy[k] is None:
+                        legacy[k] = v
+
+                # Safely construct entities structure
+                entities = legacy.get('entities')
+                if not isinstance(entities, dict):
+                    entities = {}
+                    legacy['entities'] = entities
+
+                desc = entities.get('description')
+                if not isinstance(desc, dict):
+                    desc = {}
+                    entities['description'] = desc
+                if 'urls' not in desc or desc['urls'] is None:
+                    desc['urls'] = []
+
+                url_ent = entities.get('url')
+                if not isinstance(url_ent, dict):
+                    url_ent = {}
+                    entities['url'] = url_ent
+                if 'urls' not in url_ent or url_ent['urls'] is None:
+                    url_ent['urls'] = []
+
+        except Exception as patch_err:
+            _patch_log.warning(f"Error applying User safety patch: {patch_err}")
+
+        original_init(self, client, data, *args, **kwargs)
+    return new_init
+
+# Apply the patch to twikit.user.User
+try:
+    from twikit.user import User as _User
+    _User.__init__ = _patch_user_init(_User.__init__)
+except Exception as patch_err:
+    _patch_log.warning(f"Could not patch twikit.user.User: {patch_err}")
+
+# Apply the patch to twikit.guest.user.User
+try:
+    from twikit.guest.user import User as _GuestUser
+    _GuestUser.__init__ = _patch_user_init(_GuestUser.__init__)
+except Exception as patch_err:
+    _patch_log.warning(f"Could not patch twikit.guest.user.User: {patch_err}")
+# ── End user patch ──────────────────────────────────
+
 # Reconfigure stdout to support unicode/emojis in Windows console
 sys.stdout.reconfigure(encoding='utf-8')
 
