@@ -90,7 +90,7 @@ Selection rules:
 - Prefer recent, specific updates over older viral tweets.
 - Do not choose more than one tweet about the same underlying development.
 
-For each selected tweet, write a short, Telegram-friendly summary. Keep it concise, factual, and easy to scan. No hype.
+For each selected tweet, write a short, Telegram-friendly summary. Write all summaries in strict English, regardless of the language of the source tweet. Keep it concise, factual, and easy to scan. No hype.
 
 Candidate tweets:
 {tweets_text}
@@ -141,14 +141,15 @@ Candidate tweets:
 # TELEGRAM
 # ─────────────────────────────────────────────────────────────
 
-def telegram_post(text: str, chat_id: str) -> bool:
+def telegram_post(text: str, chat_id: str, preview_url: str | None = None) -> bool:
     url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {
         "chat_id":                  chat_id,
         "text":                     text,
         "parse_mode":               "HTML",
-        "disable_web_page_preview": False,
     }
+    if preview_url:
+        data["link_preview_options"] = {"url": preview_url}
     resp = requests.post(url, json=data, timeout=10)
     if not resp.ok:
         print(f"  [!] Telegram error {resp.status_code}: {resp.text[:200]}")
@@ -174,8 +175,10 @@ def detect_chat_id() -> str | None:
 def format_message(rank: int, tweet: dict, summary: str) -> str:
     author  = tweet["author"]
     url     = tweet["url"]
-    body    = html.escape(" ".join((summary or "").split()))
-    return f"<b>{rank}.</b>  @{author}\n{body}\n\n{url}"
+    # Twitter API pre-encodes HTML entities (e.g. &gt; for >).
+    # Unescape first so we don't double-encode them before re-escaping for Telegram.
+    clean   = html.escape(html.unescape(" ".join((summary or "").split())))
+    return f"<b>{rank}.</b>  @{author}\n{clean}\n\n{url}"
 
 
 def format_header() -> str:
@@ -213,7 +216,7 @@ async def main():
 
     telegram_post(format_header(), chat_id)
     for rank, (tweet, summary) in enumerate(top, 1):
-        ok = telegram_post(format_message(rank, tweet, summary), chat_id)
+        ok = telegram_post(format_message(rank, tweet, summary), chat_id, preview_url=tweet["url"])
         print(f"  [{'ok' if ok else '!!'}] {rank}. @{tweet['author']}")
 
     print("\n  Done.")

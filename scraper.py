@@ -255,6 +255,15 @@ def is_recent(tweet: dict, days: int = RECENT_DAYS) -> bool:
     return (datetime.now(timezone.utc) - created).days <= days
 
 
+def is_english(tweet: dict) -> bool:
+    """Return True if the tweet text is predominantly Latin/ASCII (i.e. English)."""
+    text = tweet.get("text", "")
+    if not text:
+        return True
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    return (ascii_chars / len(text)) >= 0.80
+
+
 def ai_relevance_score(tweet: dict) -> int:
     text = f"{tweet['author']} {tweet['text']}".lower()
     if any(keyword in text for keyword in NOISE_KEYWORDS):
@@ -263,7 +272,7 @@ def ai_relevance_score(tweet: dict) -> int:
 
 
 def should_keep_tweet(tweet: dict) -> bool:
-    return is_recent(tweet) and ai_relevance_score(tweet) > 0
+    return is_recent(tweet) and ai_relevance_score(tweet) > 0 and is_english(tweet)
 
 
 def print_tweet_summary(tweet: dict, index: int) -> None:
