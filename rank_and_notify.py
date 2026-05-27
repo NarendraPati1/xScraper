@@ -216,7 +216,7 @@ async def main():
 
     telegram_post(format_header(), chat_id)
     for rank, (tweet, summary) in enumerate(top, 1):
-        ok = telegram_post(format_message(rank, tweet, summary), chat_id, preview_url=tweet["url"])
+        ok = telegram_post(format_message(rank, tweet, summary), chat_id, preview_url=tweet["preview_url"])
         print(f"  [{'ok' if ok else '!!'}] {rank}. @{tweet['author']}")
 
     print("\n  Done.")

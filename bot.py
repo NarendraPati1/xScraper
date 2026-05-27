@@ -93,7 +93,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     chat_id=chat_id,
                     text=format_message(rank, tweet, summary),
                     parse_mode="HTML",
-                    link_preview_options=LinkPreviewOptions(url=tweet["url"]),
+                    link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
                 )
                 await asyncio.sleep(0.3)
             return
@@ -143,7 +143,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     chat_id=chat_id,
                     text=format_message(rank, tweet, summary),
                     parse_mode="HTML",
-                    link_preview_options=LinkPreviewOptions(url=tweet["url"]),
+                    link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
                 )
                 await asyncio.sleep(0.3)
 
@@ -192,7 +192,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id,
             text=format_message(start_rank + i, tweet, tweet["text"]),
             parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(url=tweet["url"]),
+            link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
         )
         await asyncio.sleep(0.3)
 

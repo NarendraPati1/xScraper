@@ -107,7 +107,7 @@ try:
 except Exception:
     pass  # If patch fails, proceed normally and let twikit report the error.
 
-from twikit import Client
+from twikit import Client, Unauthorized, Forbidden, NotFound
 
 # X sometimes omits optional user fields from GraphQL responses. Twikit 2.3.3
 # treats some of them as required, which can drop otherwise valid tweets.
@@ -235,6 +235,8 @@ def format_tweet(tweet) -> dict:
     source = tweet.retweeted_tweet if tweet.retweeted_tweet else tweet
     
     text = source.text or ""
+    preview_url = f"https://twitter.com/{source.user.screen_name}/status/{source.id}"
+    
     # Retrieve quote tweet if available
     is_quote = getattr(source, "is_quote_status", False) or getattr(source, "is_quote", False)
     quote_obj = getattr(source, "quote", None)
@@ -245,15 +247,18 @@ def format_tweet(tweet) -> dict:
             quoted_author = getattr(quote_obj.user, "screen_name", "") or getattr(quote_obj.user, "username", "")
         if quoted_text:
             text += f"\n\n[Quoted from @{quoted_author}]: {quoted_text}"
+            if quoted_author and quote_obj.id:
+                preview_url = f"https://twitter.com/{quoted_author}/status/{quote_obj.id}"
 
     return {
-        "id":        source.id,
-        "author":    source.user.screen_name,
-        "text":      text,
-        "likes":     source.favorite_count,
-        "retweets":  source.retweet_count,
-        "created":   source.created_at,
-        "url":       f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
+        "id":          source.id,
+        "author":      source.user.screen_name,
+        "text":        text,
+        "likes":       source.favorite_count,
+        "retweets":    source.retweet_count,
+        "created":     source.created_at,
+        "url":         f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
+        "preview_url": preview_url,
     }
 
 
@@ -317,7 +322,28 @@ async def main(verbose: bool = True, save_json: bool | None = None):
     if os.path.exists(COOKIES_FILE):
         if verbose:
             print(f"[+] Loading saved cookies from {COOKIES_FILE}")
-        client.load_cookies(COOKIES_FILE)
+        try:
+            client.load_cookies(COOKIES_FILE)
+            # Verify if cookies are still fully valid by running a quick simple search.
+            # Using count=1 minimizes overhead and is extremely fast.
+            await client.search_tweet("AI", "Latest", count=1)
+            if verbose:
+                print("[+] Cookies are valid and search is functioning.")
+        except (Unauthorized, Forbidden, NotFound) as e:
+            print(f"[!] Saved cookies are invalid, expired, or partially stale: {e}")
+            print("[!] Deleting stale cookies file and performing fresh login...")
+            try:
+                os.remove(COOKIES_FILE)
+            except Exception as remove_err:
+                print(f"[!] Failed to delete cookies file: {remove_err}")
+            
+            await client.login(
+                auth_info_1=TWITTER_USERNAME,
+                auth_info_2=TWITTER_EMAIL,
+                password=TWITTER_PASSWORD,
+            )
+            client.save_cookies(COOKIES_FILE)
+            print(f"[+] Fresh cookies saved to {COOKIES_FILE}")
     else:
         if verbose:
             print("[+] No cookies found; logging in...")
@@ -344,6 +370,13 @@ async def main(verbose: bool = True, save_json: bool | None = None):
                 t = format_tweet(tweet)
                 if t["likes"] >= MIN_FAVORITES and should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
+        except (Unauthorized, Forbidden, NotFound) as e:
+            print(f"    [!] Query failed with session/cookie error: {e}")
+            print("    [!] Deleting stale cookies file to force fresh login next run.")
+            try:
+                os.remove(COOKIES_FILE)
+            except Exception:
+                pass
         except Exception as e:
             print(f"    [!] Query failed: {e}")
         await asyncio.sleep(2)   # be polite between requests
@@ -361,6 +394,13 @@ async def main(verbose: bool = True, save_json: bool | None = None):
                 t = format_tweet(tweet)
                 if should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
+        except (Unauthorized, Forbidden, NotFound) as e:
+            print(f"    [!] Failed for @{username} with session/cookie error: {e}")
+            print("    [!] Deleting stale cookies file to force fresh login next run.")
+            try:
+                os.remove(COOKIES_FILE)
+            except Exception:
+                pass
         except Exception as e:
             print(f"    [!] Failed for @{username}: {e}")
         await asyncio.sleep(1.5)
