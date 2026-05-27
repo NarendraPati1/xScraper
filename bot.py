@@ -77,7 +77,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         age_mins = (now - _cached_at).total_seconds() / 60
         if age_mins < CACHE_MINUTES:
             log.info(f"Serving cached results to chat_id={chat_id} (age: {age_mins:.1f} min)")
-            await update.message.reply_text(f"Here's your digest, {user}! ⚡ (cached {int(age_mins)}m ago)")
+            log.info(f"Serving cached results silently to chat_id={chat_id}")
             await context.bot.send_message(chat_id=chat_id, text=format_header(), parse_mode="HTML")
             for rank, (tweet, summary) in enumerate(_cached_results, 1):
                 await context.bot.send_message(
