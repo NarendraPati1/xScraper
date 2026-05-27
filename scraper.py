@@ -21,161 +21,8 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from twikit import Client
-import twikit.x_client_transaction.transaction as tx_mod
 
 load_dotenv()
-
-# ── Cloudflare-bypass patch ───────────────────────────
-# Render's IPs are blocked by Cloudflare on x.com, so the twikit
-# ClientTransaction can never fetch the KEY_BYTE indices it needs.
-# Fix: if TWITTER_TX_CACHE env var is set (JSON with pre-extracted
-# values from a local machine), inject them directly into the
-# transaction object at startup so x.com is never fetched.
-
-_TX_CACHE: dict | None = None
-_TX_CACHE_RAW = os.getenv("TWITTER_TX_CACHE", "")
-if _TX_CACHE_RAW:
-    try:
-        _TX_CACHE = json.loads(_TX_CACHE_RAW)
-        print("[+] Loaded TWITTER_TX_CACHE from environment.")
-    except Exception as e:
-        print(f"[!] Failed to parse TWITTER_TX_CACHE: {e}")
-
-
-def _seed_transaction(ct: tx_mod.ClientTransaction) -> bool:
-    """Pre-populate a ClientTransaction from the cached env values.
-    Returns True if seeding succeeded, False otherwise."""
-    if not _TX_CACHE:
-        return False
-    try:
-        import bs4
-        ct.DEFAULT_ROW_INDEX = _TX_CACHE["DEFAULT_ROW_INDEX"]
-        ct.DEFAULT_KEY_BYTES_INDICES = _TX_CACHE["DEFAULT_KEY_BYTES_INDICES"]
-        ct.key = _TX_CACHE["key"]
-        ct.key_bytes = _TX_CACHE["key_bytes"]
-        ct.animation_key = _TX_CACHE["animation_key"]
-        # home_page_response must be truthy so twikit skips re-init;
-        # use a minimal dummy BeautifulSoup object.
-        ct.home_page_response = bs4.BeautifulSoup("<html></html>", "lxml")
-        print("[+] Transaction pre-seeded from TWITTER_TX_CACHE.")
-        return True
-    except Exception as e:
-        print(f"[!] Failed to seed transaction: {e}")
-        return False
-
-# ── End patch ────────────────────────────────────────
-
-# ── Tweet property safety patch ──────────────────────
-# twikit Tweet uses hard bracket access on legacy fields
-# (e.g. legacy['favorite_count']) which raises KeyError when
-# the Twitter API omits those fields, causing tweet_from_data
-# to silently drop every result. Patch them to use .get().
-from twikit.tweet import Tweet as _Tweet
-
-_Tweet.favorite_count = property(lambda self: self._legacy.get('favorite_count', 0))
-_Tweet.favorited      = property(lambda self: self._legacy.get('favorited', False))
-_Tweet.reply_count    = property(lambda self: self._legacy.get('reply_count', 0))
-_Tweet.retweet_count  = property(lambda self: self._legacy.get('retweet_count', 0))
-# ── End tweet patch ──────────────────────────────────
-
-# ── User property safety patch ──────────────────────
-# Patches User.__init__ for both twikit.user.User and twikit.guest.user.User
-# to ensure missing or null fields in legacy/entities don't raise KeyErrors.
-import logging
-_patch_log = logging.getLogger("twikit_user_patch")
-
-def _patch_user_init(original_init):
-    def new_init(self, client, data, *args, **kwargs):
-        try:
-            if isinstance(data, dict):
-                # Ensure rest_id exists
-                if 'rest_id' not in data and 'id' in data:
-                    data['rest_id'] = data['id']
-                elif 'rest_id' not in data:
-                    data['rest_id'] = '0'
-
-                if 'is_blue_verified' not in data:
-                    data['is_blue_verified'] = False
-
-                legacy = data.get('legacy')
-                if not isinstance(legacy, dict):
-                    legacy = {}
-                    data['legacy'] = legacy
-
-                # Safe defaults for all possible keys in legacy
-                safe_defaults = {
-                    'created_at': '',
-                    'name': '',
-                    'screen_name': '',
-                    'profile_image_url_https': '',
-                    'location': '',
-                    'description': '',
-                    'pinned_tweet_ids_str': [],
-                    'verified': False,
-                    'possibly_sensitive': False,
-                    'default_profile': False,
-                    'default_profile_image': False,
-                    'has_custom_timelines': False,
-                    'followers_count': 0,
-                    'fast_followers_count': 0,
-                    'normal_followers_count': 0,
-                    'friends_count': 0,
-                    'favourites_count': 0,
-                    'listed_count': 0,
-                    'media_count': 0,
-                    'statuses_count': 0,
-                    'is_translator': False,
-                    'translator_type': '',
-                    'withheld_in_countries': [],
-                    'protected': False,
-                    'can_dm': False,
-                    'can_media_tag': False,
-                    'want_retweets': False,
-                }
-                for k, v in safe_defaults.items():
-                    if k not in legacy or legacy[k] is None:
-                        legacy[k] = v
-
-                # Safely construct entities structure
-                entities = legacy.get('entities')
-                if not isinstance(entities, dict):
-                    entities = {}
-                    legacy['entities'] = entities
-
-                desc = entities.get('description')
-                if not isinstance(desc, dict):
-                    desc = {}
-                    entities['description'] = desc
-                if 'urls' not in desc or desc['urls'] is None:
-                    desc['urls'] = []
-
-                url_ent = entities.get('url')
-                if not isinstance(url_ent, dict):
-                    url_ent = {}
-                    entities['url'] = url_ent
-                if 'urls' not in url_ent or url_ent['urls'] is None:
-                    url_ent['urls'] = []
-
-        except Exception as patch_err:
-            _patch_log.warning(f"Error applying User safety patch: {patch_err}")
-
-        original_init(self, client, data, *args, **kwargs)
-    return new_init
-
-# Apply the patch to twikit.user.User
-try:
-    from twikit.user import User as _User
-    _User.__init__ = _patch_user_init(_User.__init__)
-except Exception as patch_err:
-    _patch_log.warning(f"Could not patch twikit.user.User: {patch_err}")
-
-# Apply the patch to twikit.guest.user.User
-try:
-    from twikit.guest.user import User as _GuestUser
-    _GuestUser.__init__ = _patch_user_init(_GuestUser.__init__)
-except Exception as patch_err:
-    _patch_log.warning(f"Could not patch twikit.guest.user.User: {patch_err}")
-# ── End user patch ──────────────────────────────────
 
 # Reconfigure stdout to support unicode/emojis in Windows console
 sys.stdout.reconfigure(encoding='utf-8')
@@ -209,12 +56,8 @@ SEARCH_QUERIES = [
 ]
 
 # Minimum engagement to filter noise
-# (Twitter's min_faves: operator in the query already handles filtering;
-#  this is a safety floor — set to 0 to avoid dropping tweets where the
-#  API doesn't return favorite_count in the response payload)
-MIN_FAVORITES = 0
+MIN_FAVORITES = 20
 MAX_TWEETS_PER_QUERY = 10   # twikit max is 20 per call
-
 
 
 # ─────────────────────────────────────────────
@@ -229,14 +72,13 @@ def format_tweet(tweet) -> dict:
         "id":        source.id,
         "author":    source.user.screen_name,
         "text":      source.text,
-        "likes":     source.favorite_count or 0,
-        "retweets":  source.retweet_count or 0,
-        "replies":   source.reply_count or 0,
-        "views":     source.view_count or 0,
+        "likes":     source.favorite_count,
+        "retweets":  source.retweet_count,
+        "replies":   source.reply_count,
+        "views":     source.view_count,
         "created":   source.created_at,
         "url":       f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
     }
-
 
 
 def print_tweet(t: dict, index: int):
@@ -248,36 +90,13 @@ def print_tweet(t: dict, index: int):
 
 
 # ─────────────────────────────────────────────
-# PERSISTENT CLIENT SINGLETON
+# MAIN SCRAPER
 # ─────────────────────────────────────────────
-# We keep one Client instance alive for the entire process lifetime.
-# twikit's ClientTransaction fetches x.com once on the first request
-# to get KEY_BYTE indices. On cloud hosts, Cloudflare blocks repeated
-# fetches. By reusing the same client, x.com is only fetched once
-# at startup and the transaction is cached forever.
 
-_client: Client | None = None
-
-
-async def get_client() -> Client:
-    """Return (and lazily initialize) the persistent twikit Client."""
-    global _client
-    if _client is not None:
-        return _client
-
+async def main():
     client = Client("en-US")
 
-    # ── Restore cookies ────────────────────────
-    if not os.path.exists(COOKIES_FILE):
-        env_cookies = os.getenv("TWITTER_COOKIES_JSON")
-        if env_cookies:
-            print("[+] Found TWITTER_COOKIES_JSON in environment. Restoring cookies...")
-            try:
-                with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-                    f.write(env_cookies)
-            except Exception as e:
-                print(f"[!] Failed to write TWITTER_COOKIES_JSON to file: {e}")
-
+    # ── Login or reuse saved cookies ──────────
     if os.path.exists(COOKIES_FILE):
         print(f"[+] Loading saved cookies from {COOKIES_FILE}")
         client.load_cookies(COOKIES_FILE)
@@ -290,21 +109,6 @@ async def get_client() -> Client:
         )
         client.save_cookies(COOKIES_FILE)
         print(f"[+] Cookies saved to {COOKIES_FILE}")
-
-    # ── Pre-seed ClientTransaction so x.com is never fetched ──
-    if not _seed_transaction(client.client_transaction):
-        print("[!] TWITTER_TX_CACHE not set. twikit will attempt to fetch x.com on first request.")
-
-    _client = client
-    return _client
-
-
-# ─────────────────────────────────────────────
-# MAIN SCRAPER
-# ─────────────────────────────────────────────
-
-async def main():
-    client = await get_client()
 
     all_tweets = {}   # keyed by tweet ID to auto-deduplicate
 

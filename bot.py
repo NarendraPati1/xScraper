@@ -19,9 +19,7 @@ import asyncio
 import logging
 import os
 import sys
-import threading
 from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -29,16 +27,10 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ── local modules ──────────────────────────────────────────
 from scraper import main as run_scraper
-from rank_and_notify import format_message, format_header
+from rank_and_notify import rank_with_gemini, format_message, format_header
 
 load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
-
-# Cache Configuration
-CACHE_DURATION_SECS = 900  # 15 minutes
-cache_lock = asyncio.Lock()
-cached_top = None       # stores list of tweet dicts
-cached_time = None      # stores datetime object of last successful scrape
 
 logging.basicConfig(
     format="%(asctime)s  %(levelname)s  %(message)s",
@@ -56,7 +48,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "AI News Bot\n"
         "────────────────────\n"
-        "Send /update to get the latest top 5 AI developments from X/Twitter.\n\n"
+        "Send /update to get the latest top 5 AI developments from X/Twitter,\n"
+        "ranked and summarised by Gemini AI.\n\n"
         "/help for all commands."
     )
 
@@ -73,129 +66,47 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
     user    = update.effective_user.first_name or "there"
 
-    global cached_top, cached_time
+    await update.message.reply_text(
+        f"On it, {user}. Scraping X and ranking with Gemini — this takes about 60 seconds..."
+    )
 
-    # Check cache first (without acquiring lock to avoid blocking check queries)
-    now = datetime.now()
-    if cached_top is not None and cached_time is not None:
-        elapsed = (now - cached_time).total_seconds()
-        if elapsed < CACHE_DURATION_SECS:
-            log.info(f"Serving cached updates to chat_id={chat_id} (cache age: {elapsed:.1f}s)")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=format_header(),
-                parse_mode="HTML",
-            )
-            for rank, tweet in enumerate(cached_top, 1):
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=format_message(rank, tweet),
-                    parse_mode="HTML",
-                    disable_web_page_preview=False,
-                )
-                await asyncio.sleep(0.3)
+    try:
+        # 1. Scrape
+        log.info(f"Running scraper for chat_id={chat_id}")
+        tweets = await run_scraper()
+
+        if not tweets:
+            await context.bot.send_message(chat_id=chat_id, text="No tweets found. Try again later.")
             return
 
-    # If cache is stale/empty, acquire lock to perform scrape
-    if cache_lock.locked():
-        await update.message.reply_text(
-            "Another update request is currently in progress. Please wait a moment while it finishes..."
-        )
-        
-    async with cache_lock:
-        # Re-check cache inside lock in case it was just populated by another concurrent task
-        now = datetime.now()
-        if cached_top is not None and cached_time is not None:
-            elapsed = (now - cached_time).total_seconds()
-            if elapsed < CACHE_DURATION_SECS:
-                log.info(f"Serving newly populated cached updates to chat_id={chat_id} (cache age: {elapsed:.1f}s)")
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=format_header(),
-                    parse_mode="HTML",
-                )
-                for rank, tweet in enumerate(cached_top, 1):
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=format_message(rank, tweet),
-                        parse_mode="HTML",
-                        disable_web_page_preview=False,
-                    )
-                    await asyncio.sleep(0.3)
-                return
+        # 2. Rank + summarise
+        log.info(f"Ranking {len(tweets)} tweets with Gemini")
+        top = rank_with_gemini(tweets)
 
-        await update.message.reply_text(
-            f"On it, {user}. Scraping X — this takes about 60 seconds..."
+        # 3. Send header + individual messages
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=format_header(),
+            parse_mode="HTML",
         )
 
-        try:
-            # 1. Scrape
-            log.info(f"Running scraper for chat_id={chat_id}")
-            tweets = await run_scraper()
-
-            if not tweets:
-                await context.bot.send_message(chat_id=chat_id, text="No tweets found. Try again later.")
-                return
-
-            # 2. Select top 5 (scraper returns them sorted by likes descending)
-            log.info(f"Selecting top {min(len(tweets), 5)} tweets")
-            top = tweets[:5]
-
-            # Update Cache
-            cached_top = top
-            cached_time = datetime.now()
-            log.info("Cache successfully updated with fresh scrape results.")
-
-            # 3. Send header + individual messages
+        for rank, (tweet, summary) in enumerate(top, 1):
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=format_header(),
+                text=format_message(rank, tweet, summary),
                 parse_mode="HTML",
+                disable_web_page_preview=False,
             )
+            await asyncio.sleep(0.3)   # avoid Telegram rate limits
 
-            for rank, tweet in enumerate(top, 1):
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=format_message(rank, tweet),
-                    parse_mode="HTML",
-                    disable_web_page_preview=False,
-                )
-                await asyncio.sleep(0.3)   # avoid Telegram rate limits
+        log.info(f"Sent {len(top)} tweets to chat_id={chat_id}")
 
-            log.info(f"Sent {len(top)} fresh tweets to chat_id={chat_id}")
-
-        except Exception as exc:
-            log.exception("Error during /update")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"Something went wrong: {exc}\nPlease try again in a moment."
-            )
-
-
-# ─────────────────────────────────────────────────────────────
-# HEALTH CHECK SERVER (For Cloud Deployments)
-# ─────────────────────────────────────────────────────────────
-
-def start_health_server():
-    port = int(os.getenv("PORT", "8000"))
-    class HealthHandler(SimpleHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == "/" or self.path == "/health":
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"OK")
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def log_message(self, format, *args):
-            # Suppress standard logging to keep container outputs clean
-            pass
-
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    log.info(f"Starting health check web server on port {port}...")
-    server.serve_forever()
+    except Exception as exc:
+        log.exception("Error during /update")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Something went wrong: {exc}\nPlease try again in a moment."
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -205,9 +116,6 @@ def start_health_server():
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set in .env")
-
-    # Start health check server in background thread for Render/Koyeb health checks
-    threading.Thread(target=start_health_server, daemon=True).start()
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
