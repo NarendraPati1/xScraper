@@ -40,13 +40,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # ─────────────────────────────────────────────────────────────
 # CACHE  (30-minute in-memory result store)
 # ─────────────────────────────────────────────────────────────
-CACHE_MINUTES   = 30
-_cache_lock     = asyncio.Lock()
-_cached_results = None   # list of (tweet, summary) tuples
-_cached_at      = None   # datetime of last successful scrape
+CACHE_MINUTES    = 30
+_cache_lock      = asyncio.Lock()
+_cached_results  = None   # list of (tweet, summary) tuples — top 5 (Gemini ranked)
+_cached_extra    = None   # list of (tweet, text) tuples  — next 5 by likes
+_cached_at       = None   # datetime of last successful scrape
+
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Get AI Digest")],
+        [KeyboardButton("Get AI Digest"), KeyboardButton("More")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Tap to get today's AI digest",
@@ -59,14 +61,15 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "<b>AI News Bot</b>\n\n"
-        "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X.",
+        "Tap <b>Get AI Digest</b> to fetch the latest AI updates from X.\n"
+        "Tap <b>More</b> to see additional tweets.",
         parse_mode="HTML",
         reply_markup=MAIN_KEYBOARD,
     )
 
 
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global _cached_results, _cached_at
+    global _cached_results, _cached_extra, _cached_at
 
     chat_id = update.effective_chat.id
     user    = update.effective_user.first_name or "there"
@@ -76,8 +79,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if _cached_results and _cached_at:
         age_mins = (now - _cached_at).total_seconds() / 60
         if age_mins < CACHE_MINUTES:
-            log.info(f"Serving cached results to chat_id={chat_id} (age: {age_mins:.1f} min)")
-            log.info(f"Serving cached results silently to chat_id={chat_id}")
+            log.info(f"Serving cached results silently to chat_id={chat_id} (age: {age_mins:.1f} min)")
             await context.bot.send_message(chat_id=chat_id, text=format_header(), parse_mode="HTML")
             for rank, (tweet, summary) in enumerate(_cached_results, 1):
                 await context.bot.send_message(
@@ -108,16 +110,21 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await context.bot.send_message(chat_id=chat_id, text="No tweets found. Try again later.")
                 return
 
-            # 2. Rank + summarise
+            # 2. Rank top 5 with AI
             log.info(f"Ranking {len(tweets)} tweets")
             top = rank_with_gemini(tweets)
 
-            # 3. Store in cache
-            _cached_results = top
-            _cached_at      = datetime.now()
-            log.info("Cache updated with fresh results.")
+            # 3. Build "More" batch — next 5 tweets not already in top
+            top_ids = {t["id"] for t, _ in top}
+            extra_tweets = [t for t in tweets if t["id"] not in top_ids][:5]
 
-            # 4. Send header + individual messages
+            # 4. Store in cache
+            _cached_results = top
+            _cached_extra   = [(t, t["text"]) for t in extra_tweets]
+            _cached_at      = datetime.now()
+            log.info(f"Cache updated. Top={len(top)}, Extra={len(_cached_extra)}")
+
+            # 5. Send header + top 5
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=format_header(),
@@ -131,7 +138,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     parse_mode="HTML",
                     disable_web_page_preview=False,
                 )
-                await asyncio.sleep(0.3)   # avoid Telegram rate limits
+                await asyncio.sleep(0.3)
 
             log.info(f"Sent {len(top)} tweets to chat_id={chat_id}")
 
@@ -143,10 +150,41 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
 
 
+async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the next 5 tweets that weren't in the main digest."""
+    chat_id = update.effective_chat.id
+
+    if not _cached_extra:
+        if not _cached_results:
+            await update.message.reply_text("No digest loaded yet. Tap Get AI Digest first.")
+        else:
+            await update.message.reply_text("No additional tweets available right now.")
+        return
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"<b>More from X</b>  —  {datetime.now().strftime('%d %b %Y')}",
+        parse_mode="HTML",
+    )
+
+    for rank, (tweet, text) in enumerate(_cached_extra, 6):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=format_message(rank, tweet, text),
+            parse_mode="HTML",
+            disable_web_page_preview=False,
+        )
+        await asyncio.sleep(0.3)
+
+    log.info(f"Sent {len(_cached_extra)} extra tweets to chat_id={chat_id}")
+
+
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip().lower()
     if text == "get ai digest":
         await cmd_update(update, context)
+    elif text == "more":
+        await cmd_more(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -160,6 +198,7 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("more",   cmd_more))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
 
     log.info("Bot is running. Press Ctrl+C to stop.")
