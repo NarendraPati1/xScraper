@@ -748,7 +748,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Suppress known non-critical errors (e.g. Conflict from another running instance)."""
     from telegram.error import Conflict
     if isinstance(context.error, Conflict):
-        log.warning("Telegram Conflict: another bot instance is polling. Stop the EC2 bot to resolve.")
+        log.warning("Telegram Conflict: another bot instance is polling. Ensure only one instance of the bot is running.")
         return
     log.error(f"Unhandled exception: {context.error}", exc_info=context.error)
 
