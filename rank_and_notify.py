@@ -568,7 +568,9 @@ def format_message(rank: int, tweet: dict, summary: str) -> str:
 
 
 def format_header() -> str:
-    today = datetime.now().strftime("%d %b %Y")
+    from datetime import timezone, timedelta
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    today = datetime.now(ist_tz).strftime("%d %b %Y")
     return f"<b>AI News Digest</b>  —  {today}"
 
 # ─────────────────────────────────────────────────────────────
