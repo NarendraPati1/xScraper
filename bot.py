@@ -194,8 +194,7 @@ async def background_scraper_loop(application: Application) -> None:
                 save_tweets_cache(tweets)
 
                 # Rank top 50 globally (no user prefs — unbiased)
-                log.info("Background Scraper: Ranking top 50 with Gemini...")
-                ranked = rank_with_gemini(tweets, chat_id=None, count=50)
+                ranked = await asyncio.to_thread(rank_with_gemini, tweets, chat_id=None, count=50)
                 if ranked:
                     _global_ranked_results = ranked
                     save_ranked_cache(ranked)
@@ -340,7 +339,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                         _global_scraped_tweets = tweets
                         _global_scraped_at = datetime.now()
                         save_tweets_cache(tweets)
-                        ranked = rank_with_gemini(tweets, chat_id=None, count=50)
+                        ranked = await asyncio.to_thread(rank_with_gemini, tweets, chat_id=None, count=50)
                         if ranked:
                             _global_ranked_results = ranked
                             _global_more_summaries = {str(t["id"]): s for t, s in ranked}
