@@ -14,6 +14,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -32,6 +33,263 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 TOP_N = 5
 MAX_GEMINI_CANDIDATES = int(os.getenv("MAX_GEMINI_CANDIDATES", "60"))
+
+PREFERENCES_FILE = Path("user_preferences.json")
+
+# ─────────────────────────────────────────────────────────────
+# USER PREFERENCES
+# ─────────────────────────────────────────────────────────────
+
+def load_preferences(chat_id: str | None = None) -> dict:
+    """Load user preferences from disk."""
+    suffix = f"_{chat_id}" if chat_id else ""
+    file_path = Path(f"user_preferences{suffix}.json")
+    if file_path.exists():
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                data.setdefault("liked_topics", [])
+                data.setdefault("liked_tweets", [])
+                data.setdefault("disliked_topics", [])
+                data.setdefault("disliked_tweets", [])
+                return data
+        except Exception:
+            pass
+    return {"liked_topics": [], "liked_tweets": [], "disliked_topics": [], "disliked_tweets": []}
+
+
+def save_preferences(prefs: dict, chat_id: str | None = None) -> None:
+    """Save user preferences to disk."""
+    suffix = f"_{chat_id}" if chat_id else ""
+    file_path = Path(f"user_preferences{suffix}.json")
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[!] Could not save preferences: {e}")
+
+
+def add_liked_tweet(tweet: dict, topic: str, chat_id: str | None = None) -> None:
+    """Add a liked tweet and its extracted topic to preferences (rolling list of last 10 likes)."""
+    prefs = load_preferences(chat_id)
+
+    # Remove any existing tweet with this ID so we can place it at the end (newest)
+    prefs["liked_tweets"] = [t for t in prefs["liked_tweets"] if str(t.get("id")) != str(tweet.get("id"))]
+
+    # Append new like
+    prefs["liked_tweets"].append({
+        "id": str(tweet.get("id")),
+        "author": tweet.get("author", ""),
+        "text_snippet": (tweet.get("text", ""))[:200],
+        "topic": topic,
+        "liked_at": datetime.now().isoformat(),
+    })
+
+    # Keep only the rolling window of the last 10 liked tweets (newest are at the end)
+    if len(prefs["liked_tweets"]) > 10:
+        prefs["liked_tweets"] = prefs["liked_tweets"][-10:]
+
+    # Rebuild liked_topics ordered by recency (newest first)
+    seen_topics = set()
+    unique_topics = []
+    # Loop backwards through liked tweets (most recent first)
+    for t in reversed(prefs["liked_tweets"]):
+        t_name = t.get("topic", "")
+        if t_name and t_name.lower() not in seen_topics:
+            seen_topics.add(t_name.lower())
+            unique_topics.append(t_name)
+
+    prefs["liked_topics"] = unique_topics
+
+    save_preferences(prefs, chat_id)
+
+
+def remove_liked_topic(topic: str, chat_id: str | None = None) -> bool:
+    """Remove a specific topic from the user's tracked list. Returns True if found and removed."""
+    prefs = load_preferences(chat_id)
+    topic_lower = topic.strip().lower()
+
+    # Remove from liked_tweets whose topic matches
+    original_len = len(prefs["liked_tweets"])
+    prefs["liked_tweets"] = [
+        t for t in prefs["liked_tweets"]
+        if t.get("topic", "").lower() != topic_lower
+    ]
+
+    # Rebuild liked_topics
+    seen_topics: set = set()
+    unique_topics = []
+    for t in reversed(prefs["liked_tweets"]):
+        t_name = t.get("topic", "")
+        if t_name and t_name.lower() not in seen_topics:
+            seen_topics.add(t_name.lower())
+            unique_topics.append(t_name)
+    prefs["liked_topics"] = unique_topics
+
+    save_preferences(prefs, chat_id)
+    return len(prefs["liked_tweets"]) < original_len
+
+
+def add_disliked_tweet(tweet: dict, topic: str, chat_id: str | None = None) -> None:
+    """Add a disliked tweet and its topic to preferences (rolling list of last 20 dislikes)."""
+    prefs = load_preferences(chat_id)
+    prefs.setdefault("disliked_tweets", [])
+
+    # Remove any existing tweet with this ID
+    prefs["disliked_tweets"] = [t for t in prefs["disliked_tweets"] if str(t.get("id")) != str(tweet.get("id"))]
+
+    # Append new dislike
+    prefs["disliked_tweets"].append({
+        "id": str(tweet.get("id")),
+        "author": tweet.get("author", ""),
+        "text_snippet": (tweet.get("text", ""))[:200],
+        "topic": topic,
+        "disliked_at": datetime.now().isoformat(),
+    })
+
+    if len(prefs["disliked_tweets"]) > 20:
+        prefs["disliked_tweets"] = prefs["disliked_tweets"][-20:]
+
+    # Also add the topic to disliked_topics
+    disliked_topics = prefs.get("disliked_topics", [])
+    if topic.lower() not in [d.lower() for d in disliked_topics]:
+        disliked_topics.append(topic)
+    prefs["disliked_topics"] = disliked_topics[-20:]
+
+    save_preferences(prefs, chat_id)
+
+
+async def curate_feed_locally(
+    global_ranked_results: list[tuple[dict, str]],
+    chat_id: str,
+    top_n: int = 5,
+) -> tuple[list[tuple[dict, str]], list[tuple[dict, str]]]:
+    """Curate the globally pre-ranked pool for a specific user.
+
+    If the user has liked topics, makes a single Gemini call to semantically
+    match the 50 pre-ranked tweets against their interests.
+
+    If the user has no preferences, returns the global top N as-is.
+
+    Disliked topics are always suppressed before Gemini sees the candidates.
+
+    Returns:
+        (top_n results, remaining more_pool — both as list of (tweet, summary))
+    """
+    prefs = load_preferences(chat_id)
+    liked_tweets_meta = prefs.get("liked_tweets", [])   # ordered oldest→newest
+    liked_topics      = prefs.get("liked_topics", [])   # newest first
+    disliked_topics   = [d.lower() for d in prefs.get("disliked_topics", [])]
+
+    # ── Step 1: Filter out disliked topics from the pool ──────
+    def _is_disliked(tweet: dict, summary: str) -> bool:
+        content = (tweet.get("text", "") + " " + summary).lower()
+        for dtopic in disliked_topics:
+            dwords = [w for w in dtopic.split() if len(w) > 2]
+            if dwords and sum(1 for w in dwords if w in content) / len(dwords) >= 0.6:
+                return True
+        return False
+
+    candidates = [(t, s) for t, s in global_ranked_results if not _is_disliked(t, s)]
+
+    # ── Step 2: No preferences → just return global top N ─────
+    if not liked_topics:
+        top  = candidates[:top_n]
+        rest = candidates[top_n:]
+        return top, rest
+
+    # ── Step 3: Semantic re-ranking via Gemini ─────────────────
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        # Fallback: return global order
+        return candidates[:top_n], candidates[top_n:]
+
+    # Build age-aware topic string (most recent topics listed first with weight hint)
+    now = datetime.now()
+    topic_lines = []
+    for lt in reversed(liked_tweets_meta):  # newest first
+        topic = lt.get("topic", "").strip()
+        if not topic:
+            continue
+        try:
+            age_days = (now - datetime.fromisoformat(lt.get("liked_at", ""))).days
+        except Exception:
+            age_days = 0
+        recency = "very recently" if age_days < 2 else f"{age_days} days ago"
+        topic_lines.append(f"  - \"{topic}\" (liked {recency})")
+
+    topics_block = "\n".join(topic_lines)
+
+    # Build concise candidate list: just ID + one-line summary
+    candidate_lines = []
+    tweets_map: dict[str, tuple[dict, str]] = {}
+    for t, s in candidates:
+        tid = str(t["id"])
+        tweets_map[tid] = (t, s)
+        short = (" ".join(s.split()))[:200]
+        candidate_lines.append(f"ID:{tid} | {short}")
+
+    candidates_block = "\n".join(candidate_lines)
+
+    prompt = f"""You are personalizing an AI news feed.
+
+The user has liked these topics (ordered from most to least recent — weight recent ones higher):
+{topics_block}
+
+Below are {len(candidates)} pre-curated AI news tweets (ID | summary).
+Pick the {top_n} tweets that are MOST semantically relevant to the user's interests.
+Semantic relevance means conceptual similarity, not just exact keyword matches.
+
+For each selected tweet, reuse its existing summary but prefix it with "🔄 Update on <matched topic>: " if it is a follow-up or update on one of the user's tracked topics. Otherwise keep the summary as-is.
+
+Return ONLY a JSON array of {top_n} objects in order of relevance:
+[{{"id": "<tweet_id>", "summary": "<summary>"}}]
+
+Candidates:
+{candidates_block}
+"""
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        import re as _re
+        raw = (response.text or "").strip()
+        # Strip markdown code fences if present
+        raw = _re.sub(r"^```[a-z]*\n?", "", raw).rstrip("` \n")
+        ranked_ids: list[dict] = json.loads(raw)
+
+        top: list[tuple[dict, str]] = []
+        seen: set = set()
+        for item in ranked_ids:
+            tid = str(item.get("id", "")).strip()
+            custom_summary = item.get("summary", "")
+            if tid in tweets_map and tid not in seen:
+                orig_tweet, orig_summary = tweets_map[tid]
+                final_summary = custom_summary if custom_summary else orig_summary
+                top.append((orig_tweet, final_summary))
+                seen.add(tid)
+            if len(top) >= top_n:
+                break
+
+        # Fill up to top_n from global order if Gemini returned fewer
+        if len(top) < top_n:
+            for t, s in candidates:
+                if str(t["id"]) not in seen:
+                    top.append((t, s))
+                if len(top) >= top_n:
+                    break
+
+        rest = [(t, s) for t, s in candidates if str(t["id"]) not in {str(x["id"]) for x, _ in top}]
+        return top, rest
+
+    except Exception as e:
+        print(f"[!] Semantic curation failed: {e}. Falling back to global order.")
+        return candidates[:top_n], candidates[top_n:]
+
 
 # ─────────────────────────────────────────────────────────────
 # SCRAPER
@@ -63,8 +321,62 @@ def _candidate_payload(tweet: dict) -> str:
     )
 
 
-def rank_with_gemini(tweets: list[dict]) -> list[tuple[dict, str]]:
-    """Rank tweets using Gemini AI and return a list of tuples containing (tweet_dict, summary)."""
+def _preferences_context(prefs: dict) -> str:
+    """Build a preferences context block to inject into Gemini prompts.
+    Prioritizes newer topics, as user interests shift over time.
+    """
+    topics = prefs.get("liked_topics", [])
+    if not topics:
+        return ""
+    # topics is ordered newest first
+    topics_str = ", ".join(f'"{t}"' for t in topics)
+    return (
+        f"\nUser Preferences (topics user has liked, ordered from newest/most-relevant to oldest):\n"
+        f"  Tracked topics: {topics_str}\n"
+        f"Please prioritize candidate tweets that are updates, progress reports, or directly related to these topics, "
+        f"with a stronger emphasis on the newer/first-listed topics.\n"
+        f"When curating/summarizing, if a tweet is an update or follow-up on any of these tracked topics, "
+        f'prefix its summary with "🔄 Update: " so the user knows it is a follow-up to something they care about.\n'
+    )
+
+
+async def extract_topic_with_gemini(tweet: dict) -> str:
+    """Use Gemini to extract a short 2-4 word topic label from a liked tweet."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        # Fallback: use first few words of the tweet as the topic
+        words = tweet.get("text", "Liked tweet").split()
+        return " ".join(words[:4])
+
+    client = genai.Client(api_key=api_key)
+    text = " ".join(tweet.get("text", "").split())[:500]
+    prompt = (
+        f"Extract a short, descriptive topic label (2-4 words) for this AI news tweet. "
+        f"Return ONLY the topic label, no explanation or punctuation.\n\n"
+        f"Tweet: {text}"
+    )
+
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        topic = (response.text or "").strip().strip('"').strip("'")
+        # Cap at reasonable length
+        if len(topic) > 60:
+            topic = topic[:60]
+        return topic or "AI Development"
+    except Exception as e:
+        print(f"[!] Error extracting topic: {e}")
+        words = tweet.get("text", "AI Development").split()
+        return " ".join(words[:4])
+
+
+def rank_with_gemini(tweets: list[dict], chat_id: str | None = None, count: int = TOP_N) -> list[tuple[dict, str]]:
+    """Rank tweets using Gemini AI and return a list of tuples containing (tweet_dict, summary).
+    
+    Injects user preferences if chat_id is provided, and curates up to `count` tweets.
+    """
     if not tweets:
         return []
 
@@ -72,24 +384,28 @@ def rank_with_gemini(tweets: list[dict]) -> list[tuple[dict, str]]:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("[!] GEMINI_API_KEY is not set in .env")
-        return [(t, t["text"]) for t in tweets[:TOP_N]]
+        return [(t, t["text"]) for t in tweets[:count]]
 
     client = genai.Client(api_key=api_key)
 
-    candidates = tweets[:MAX_GEMINI_CANDIDATES]
+    candidates = tweets[:max(MAX_GEMINI_CANDIDATES, count + 20)]
     tweets_text = "\n".join(_candidate_payload(t) for t in candidates)
+
+    # Load preferences for personalization
+    prefs = load_preferences(chat_id)
+    prefs_context = _preferences_context(prefs)
 
     prompt = f"""
 You are curating a concise AI news digest for builders and researchers.
 
-Select exactly {TOP_N} tweets that are the most useful AI developments from the candidate list.
+Select exactly {count} tweets that are the most useful AI developments from the candidate list.
 
 Selection rules:
 - Prefer concrete AI releases, model updates, benchmarks, research results, product launches, safety/security findings, and developer tooling.
 - Reject off-topic politics, tragedy, generic opinions, memes, engagement bait, personal updates without technical/news value, and duplicates.
 - Prefer recent, specific updates over older viral tweets.
 - Do not choose more than one tweet about the same underlying development.
-
+{prefs_context}
 For each selected tweet, write a short, Telegram-friendly summary. Write all summaries in strict English, regardless of the language of the source tweet. Keep it concise, factual, and easy to scan. No hype.
 
 Candidate tweets:
@@ -129,16 +445,19 @@ Candidate tweets:
         
         if not ranked_list:
             print("[!] Gemini returned no valid ranked tweets. Falling back to default top list.")
-            return [(t, t["text"]) for t in tweets[:TOP_N]]
+            return [(t, t["text"]) for t in tweets[:count]]
             
-        return ranked_list[:TOP_N]
+        return ranked_list[:count]
 
     except Exception as e:
         print(f"[!] Error ranking with Gemini: {e}")
-        return [(t, t["text"]) for t in tweets[:TOP_N]]
+        return [(t, t["text"]) for t in tweets[:count]]
 
-def summarize_tweets(tweets: list[dict]) -> dict[str, str]:
-    """Generate concise, scanable, factual English summaries for each input tweet using Gemini."""
+def summarize_tweets(tweets: list[dict], chat_id: str | None = None) -> dict[str, str]:
+    """Generate concise, scanable, factual English summaries for each input tweet using Gemini.
+    
+    Injects user preferences so follow-ups on liked topics are flagged with 🔄.
+    """
     if not tweets:
         return {}
 
@@ -149,13 +468,17 @@ def summarize_tweets(tweets: list[dict]) -> dict[str, str]:
     client = genai.Client(api_key=api_key)
     tweets_text = "\n".join(_candidate_payload(t) for t in tweets)
 
+    # Load preferences for personalization
+    prefs = load_preferences(chat_id)
+    prefs_context = _preferences_context(prefs)
+
     prompt = f"""
 You are summarizing AI news updates for builders and researchers.
 
 For each of the following tweets, write a short, Telegram-friendly summary. 
 Write all summaries in strict English, regardless of the language of the source tweet. 
 Keep it concise, factual, and easy to scan. No hype. Do not add intro/outro text.
-
+{prefs_context}
 Tweets to summarize:
 {tweets_text}
 """
@@ -265,8 +588,12 @@ async def main():
         return
     print(f"  {len(tweets)} tweets collected.")
 
-    # 2. Rank with Gemini
+    # 2. Rank with Gemini (preferences are injected inside)
     print("\n[2/3] Ranking and summarizing with Gemini...")
+    prefs = load_preferences()
+    topics = prefs.get("liked_topics", [])
+    if topics:
+        print(f"  [i] Personalizing with {len(topics)} tracked topic(s): {', '.join(topics)}")
     top = rank_with_gemini(tweets)
     print(f"  {len(top)} tweets selected and summarized.")
 
