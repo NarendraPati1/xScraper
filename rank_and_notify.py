@@ -12,9 +12,16 @@ import asyncio
 import html
 import json
 import os
+import random
 import sys
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+# IST timezone
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
 
 import requests
 from dotenv import load_dotenv
@@ -192,10 +199,15 @@ async def curate_feed_locally(
 
     candidates = [(t, s) for t, s in global_ranked_results if not _is_disliked(t, s)]
 
-    # ── Step 2: No preferences → just return global top N ─────
+    # ── Step 2: No preferences → randomised slice from top pool ─
     if not liked_topics:
-        top  = candidates[:top_n]
-        rest = candidates[top_n:]
+        # Pick from the top-20 with a random shuffle so each digest feels fresh
+        pool_size = min(20, len(candidates))
+        pool = candidates[:pool_size]
+        random.shuffle(pool)
+        top  = pool[:top_n]
+        # Rest = shuffled remainder of pool + everything beyond pool_size
+        rest = pool[top_n:] + candidates[pool_size:]
         return top, rest
 
     # ── Step 3: Semantic re-ranking via Gemini ─────────────────
@@ -205,7 +217,7 @@ async def curate_feed_locally(
         return candidates[:top_n], candidates[top_n:]
 
     # Build age-aware topic string (most recent topics listed first with weight hint)
-    now = datetime.now()
+    now = _now_ist()
     topic_lines = []
     for lt in reversed(liked_tweets_meta):  # newest first
         topic = lt.get("topic", "").strip()
@@ -388,7 +400,10 @@ def rank_with_gemini(tweets: list[dict], chat_id: str | None = None, count: int 
 
     client = genai.Client(api_key=api_key)
 
-    candidates = tweets[:max(MAX_GEMINI_CANDIDATES, count + 20)]
+    # Shuffle candidates so Gemini sees a different ordering each run → more variety
+    pool = tweets[:max(MAX_GEMINI_CANDIDATES, count + 20)]
+    random.shuffle(pool)
+    candidates = pool
     tweets_text = "\n".join(_candidate_payload(t) for t in candidates)
 
     # Load preferences for personalization
@@ -568,9 +583,7 @@ def format_message(rank: int, tweet: dict, summary: str) -> str:
 
 
 def format_header() -> str:
-    from datetime import timezone, timedelta
-    ist_tz = timezone(timedelta(hours=5, minutes=30))
-    today = datetime.now(ist_tz).strftime("%d %b %Y")
+    today = _now_ist().strftime("%d %b %Y, %I:%M %p IST")
     return f"<b>AI News Digest</b>  —  {today}"
 
 # ─────────────────────────────────────────────────────────────

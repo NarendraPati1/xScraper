@@ -20,7 +20,13 @@ Run locally:
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# IST timezone constant
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+def _now_ist() -> datetime:
+    return datetime.now(_IST)
 import html
 import json
 import logging
@@ -387,15 +393,28 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_cache = _user_caches.get(str(chat_id))
 
-    if not user_cache or not user_cache.get("more_pool"):
-        if not user_cache or not user_cache.get("results"):
-            await update.message.reply_text("No digest loaded yet — tap Get AI Digest first.")
-        else:
-            await update.message.reply_text("No additional tweets available right now.")
+    # If no user cache at all and no global data either — truly nothing loaded
+    if not user_cache and not _global_ranked_results:
+        await update.message.reply_text("No digest loaded yet — tap Get AI Digest first.")
         return
 
-    more_pool = user_cache["more_pool"]
-    results = user_cache["results"]
+    # If user cache is missing or has no more_pool, fall back to global ranked results
+    if not user_cache or not user_cache.get("more_pool"):
+        if _global_ranked_results:
+            # Build a synthetic more_pool from global results (skip first 10 as pseudo "top")
+            results = user_cache.get("results", []) if user_cache else []
+            shown_ids = {str(t["id"]) for t, _ in results}
+            more_pool = [(t, s) for t, s in _global_ranked_results if str(t["id"]) not in shown_ids]
+            if not more_pool:
+                await update.message.reply_text("No additional tweets available right now.")
+                return
+        else:
+            await update.message.reply_text("No additional tweets available right now.")
+            return
+    else:
+        more_pool = user_cache["more_pool"]
+
+    results = user_cache.get("results", []) if user_cache else []
 
     offset = context.user_data.get("more_offset", 0)
     batch  = more_pool[offset : offset + MORE_PAGE_SIZE]
@@ -411,7 +430,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"<b>More from X</b>  —  {datetime.now().strftime('%d %b %Y')}",
+        text=f"<b>More from X</b>  —  {_now_ist().strftime('%d %b %Y, %I:%M %p IST')}",
         parse_mode="HTML",
     )
 
