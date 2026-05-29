@@ -241,12 +241,12 @@ async def background_scraper_loop(application: Application) -> None:
 def _action_buttons(tweet_id: str, already_liked: bool = False, already_disliked: bool = False) -> InlineKeyboardMarkup:
     """Build inline keyboard with Like ❤️ and Dislike 👎 buttons."""
     if already_liked:
-        like_btn = InlineKeyboardButton("Liked ❤️", callback_data="noop")
+        like_btn = InlineKeyboardButton("Liked ❤️", callback_data=f"unlike_{tweet_id}")
     else:
         like_btn = InlineKeyboardButton("Like ❤️", callback_data=f"like_{tweet_id}")
 
     if already_disliked:
-        dislike_btn = InlineKeyboardButton("Disliked 👎", callback_data="noop")
+        dislike_btn = InlineKeyboardButton("Disliked 👎", callback_data=f"undislike_{tweet_id}")
     else:
         dislike_btn = InlineKeyboardButton("👎", callback_data=f"dislike_{tweet_id}")
 
@@ -607,10 +607,84 @@ async def callback_dislike(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         _user_caches[str(chat_id)]["dirty"] = True
     log.info(f"Disliked topic '{topic}' for chat_id={chat_id}")
 
+async def callback_unlike(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle tapping 'Liked ❤️' again — removes the like."""
+    query = update.callback_query
+    data = query.data or ""
 
-# ─────────────────────────────────────────────────────────────
-# NEW COMMANDS: /unlike, /search
-# ─────────────────────────────────────────────────────────────
+    if not data.startswith("unlike_"):
+        await query.answer()
+        return
+
+    tweet_id = data[len("unlike_"):]
+    chat_id = str(query.message.chat_id)
+
+    # Remove the liked tweet from preferences
+    prefs = load_preferences(chat_id)
+    prefs["liked_tweets"] = [t for t in prefs.get("liked_tweets", []) if str(t.get("id")) != tweet_id]
+    # Rebuild liked_topics
+    seen: set = set()
+    prefs["liked_topics"] = []
+    for t in reversed(prefs["liked_tweets"]):
+        topic = t.get("topic", "")
+        if topic and topic.lower() not in seen:
+            seen.add(topic.lower())
+            prefs["liked_topics"].append(topic)
+    save_preferences(prefs, chat_id)
+
+    if str(chat_id) in _user_caches:
+        _user_caches[str(chat_id)]["dirty"] = True
+
+    already_disliked = _is_already_disliked(tweet_id, chat_id)
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_action_buttons(tweet_id, already_liked=False, already_disliked=already_disliked)
+        )
+    except Exception:
+        pass
+
+    await query.answer("Like removed.", show_alert=False)
+    log.info(f"Unliked tweet {tweet_id} for chat_id={chat_id}")
+
+
+async def callback_undislike(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle tapping 'Disliked 👎' again — removes the dislike."""
+    query = update.callback_query
+    data = query.data or ""
+
+    if not data.startswith("undislike_"):
+        await query.answer()
+        return
+
+    tweet_id = data[len("undislike_"):]
+    chat_id = str(query.message.chat_id)
+
+    # Remove from disliked_tweets and rebuild disliked_topics
+    prefs = load_preferences(chat_id)
+    removed_tweet = next((t for t in prefs.get("disliked_tweets", []) if str(t.get("id")) == tweet_id), None)
+    prefs["disliked_tweets"] = [t for t in prefs.get("disliked_tweets", []) if str(t.get("id")) != tweet_id]
+    # Remove topic only if no other disliked tweet shares it
+    if removed_tweet:
+        topic = removed_tweet.get("topic", "").lower()
+        remaining_topics = {t.get("topic", "").lower() for t in prefs["disliked_tweets"]}
+        prefs["disliked_topics"] = [d for d in prefs.get("disliked_topics", []) if d.lower() in remaining_topics]
+    save_preferences(prefs, chat_id)
+
+    if str(chat_id) in _user_caches:
+        _user_caches[str(chat_id)]["dirty"] = True
+
+    already_liked = _is_already_liked(tweet_id, chat_id)
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_action_buttons(tweet_id, already_liked=already_liked, already_disliked=False)
+        )
+    except Exception:
+        pass
+
+    await query.answer("Dislike removed.", show_alert=False)
+    log.info(f"Undisliked tweet {tweet_id} for chat_id={chat_id}")
+
+
 
 async def cmd_unlike(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/unlike <topic> — remove a specific tracked topic."""
@@ -787,8 +861,10 @@ def main() -> None:
     app.add_handler(CommandHandler("search",      cmd_search))
 
     # Inline button callbacks
-    app.add_handler(CallbackQueryHandler(callback_like,    pattern=r"^(like_|noop)"))
-    app.add_handler(CallbackQueryHandler(callback_dislike, pattern=r"^dislike_"))
+    app.add_handler(CallbackQueryHandler(callback_like,       pattern=r"^like_"))
+    app.add_handler(CallbackQueryHandler(callback_unlike,     pattern=r"^unlike_"))
+    app.add_handler(CallbackQueryHandler(callback_dislike,    pattern=r"^dislike_"))
+    app.add_handler(CallbackQueryHandler(callback_undislike,  pattern=r"^undislike_"))
 
     # Reply keyboard text buttons
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
