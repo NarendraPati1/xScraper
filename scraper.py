@@ -318,43 +318,25 @@ async def main(verbose: bool = True, save_json: bool | None = None):
     client = Client("en-US")
     save_json = SAVE_TWEETS_JSON if save_json is None else save_json
 
-    # ── Login or reuse saved cookies ──────────
+    # ── Load saved cookies (no validation ping — it triggers Cloudflare blocks) ──
+    # Login from datacenter/server IPs is always blocked by Cloudflare.
+    # Cookies must be generated locally and copied to the server manually.
     if os.path.exists(COOKIES_FILE):
         if verbose:
             print(f"[+] Loading saved cookies from {COOKIES_FILE}")
-        try:
-            client.load_cookies(COOKIES_FILE)
-            # Verify if cookies are still fully valid by running a quick simple search.
-            # Using count=1 minimizes overhead and is extremely fast.
-            await client.search_tweet("AI", "Latest", count=1)
-            if verbose:
-                print("[+] Cookies are valid and search is functioning.")
-        except (Unauthorized, Forbidden, NotFound) as e:
-            print(f"[!] Saved cookies are invalid, expired, or partially stale: {e}")
-            print("[!] Deleting stale cookies file and performing fresh login...")
-            try:
-                os.remove(COOKIES_FILE)
-            except Exception as remove_err:
-                print(f"[!] Failed to delete cookies file: {remove_err}")
-            
-            await client.login(
-                auth_info_1=TWITTER_USERNAME,
-                auth_info_2=TWITTER_EMAIL,
-                password=TWITTER_PASSWORD,
-            )
-            client.save_cookies(COOKIES_FILE)
-            print(f"[+] Fresh cookies saved to {COOKIES_FILE}")
+        client.load_cookies(COOKIES_FILE)
+        # No validation ping — just trust the cookies and let real requests fail
+        # naturally if they're expired. Individual failures are handled per-query below.
+        if verbose:
+            print("[+] Cookies loaded. Proceeding with scrape.")
     else:
-        if verbose:
-            print("[+] No cookies found; logging in...")
-        await client.login(
-            auth_info_1=TWITTER_USERNAME,
-            auth_info_2=TWITTER_EMAIL,
-            password=TWITTER_PASSWORD,
+        # No cookies on server = cannot login (Cloudflare blocks datacenter IPs).
+        # Generate cookies locally: run `python scraper.py` on your local machine,
+        # then copy cookies.json to the server.
+        raise RuntimeError(
+            "No cookies.json found. Cannot login from a server IP (Cloudflare blocks it). "
+            "Run scraper.py locally to generate cookies.json, then scp it to the server."
         )
-        client.save_cookies(COOKIES_FILE)
-        if verbose:
-            print(f"[+] Cookies saved to {COOKIES_FILE}")
 
     all_tweets = {}   # keyed by tweet ID to auto-deduplicate
 
