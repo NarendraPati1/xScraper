@@ -371,12 +371,7 @@ async def main(verbose: bool = True, save_json: bool | None = None):
                 if t["likes"] >= MIN_FAVORITES and should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
         except (Unauthorized, Forbidden, NotFound) as e:
-            print(f"    [!] Query failed with session/cookie error: {e}")
-            print("    [!] Deleting stale cookies file to force fresh login next run.")
-            try:
-                os.remove(COOKIES_FILE)
-            except Exception:
-                pass
+            print(f"    [!] Query failed (auth/not-found): {e} — skipping query, cookies kept.")
         except Exception as e:
             print(f"    [!] Query failed: {e}")
         await asyncio.sleep(2)   # be polite between requests
@@ -395,12 +390,7 @@ async def main(verbose: bool = True, save_json: bool | None = None):
                 if should_keep_tweet(t) and t["id"] not in all_tweets:
                     all_tweets[t["id"]] = t
         except (Unauthorized, Forbidden, NotFound) as e:
-            print(f"    [!] Failed for @{username} with session/cookie error: {e}")
-            print("    [!] Deleting stale cookies file to force fresh login next run.")
-            try:
-                os.remove(COOKIES_FILE)
-            except Exception:
-                pass
+            print(f"    [!] Failed for @{username} (auth/not-found): {e} — skipping, cookies kept.")
         except Exception as e:
             print(f"    [!] Failed for @{username}: {e}")
         await asyncio.sleep(1.5)
