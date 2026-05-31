@@ -59,10 +59,11 @@ def load_preferences(chat_id: str | None = None) -> dict:
                 data.setdefault("liked_tweets", [])
                 data.setdefault("disliked_topics", [])
                 data.setdefault("disliked_tweets", [])
+                data.setdefault("shown_tweets", [])
                 return data
         except Exception:
             pass
-    return {"liked_topics": [], "liked_tweets": [], "disliked_topics": [], "disliked_tweets": []}
+    return {"liked_topics": [], "liked_tweets": [], "disliked_topics": [], "disliked_tweets": [], "shown_tweets": []}
 
 
 def save_preferences(prefs: dict, chat_id: str | None = None) -> None:
@@ -74,6 +75,25 @@ def save_preferences(prefs: dict, chat_id: str | None = None) -> None:
             json.dump(prefs, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[!] Could not save preferences: {e}")
+
+
+def add_shown_tweets(tweet_ids: list[str], chat_id: str | None = None) -> None:
+    """Record shown tweet IDs to prevent showing them again soon (rolling window of 40)."""
+    prefs = load_preferences(chat_id)
+    prefs.setdefault("shown_tweets", [])
+
+    existing = prefs["shown_tweets"]
+    for tid in tweet_ids:
+        tid_str = str(tid)
+        if tid_str in existing:
+            existing.remove(tid_str)
+        existing.append(tid_str)
+
+    if len(existing) > 40:
+        existing = existing[-40:]
+    prefs["shown_tweets"] = existing
+
+    save_preferences(prefs, chat_id)
 
 
 def add_liked_tweet(tweet: dict, topic: str, chat_id: str | None = None) -> None:
@@ -187,6 +207,7 @@ async def curate_feed_locally(
     liked_tweets_meta = prefs.get("liked_tweets", [])   # ordered oldest→newest
     liked_topics      = prefs.get("liked_topics", [])   # newest first
     disliked_topics   = [d.lower() for d in prefs.get("disliked_topics", [])]
+    shown_tweets      = {str(tid) for tid in prefs.get("shown_tweets", [])}
 
     # ── Step 1: Filter out disliked topics from the pool ──────
     def _is_disliked(tweet: dict, summary: str) -> bool:
@@ -197,7 +218,19 @@ async def curate_feed_locally(
                 return True
         return False
 
-    candidates = [(t, s) for t, s in global_ranked_results if not _is_disliked(t, s)]
+    filtered_pool = [(t, s) for t, s in global_ranked_results if not _is_disliked(t, s)]
+
+    # Further filter out recently shown tweets
+    unseen_pool = [(t, s) for t, s in filtered_pool if str(t["id"]) not in shown_tweets]
+
+    # Fallback: if we don't have enough unseen tweets, supplement with the oldest shown ones
+    if len(unseen_pool) >= top_n:
+        candidates = unseen_pool
+    else:
+        shown_order = {str(tid): idx for idx, tid in enumerate(prefs.get("shown_tweets", []))}
+        shown_candidates = [(t, s) for t, s in filtered_pool if str(t["id"]) in shown_tweets]
+        shown_candidates.sort(key=lambda x: shown_order.get(str(x[0]["id"]), -1))
+        candidates = unseen_pool + shown_candidates
 
     # ── Step 2: No preferences → randomised slice from top pool ─
     if not liked_topics:
@@ -208,13 +241,17 @@ async def curate_feed_locally(
         top  = pool[:top_n]
         # Rest = shuffled remainder of pool + everything beyond pool_size
         rest = pool[top_n:] + candidates[pool_size:]
+        add_shown_tweets([str(t["id"]) for t, _ in top], chat_id)
         return top, rest
 
     # ── Step 3: Semantic re-ranking via Gemini ─────────────────
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         # Fallback: return global order
-        return candidates[:top_n], candidates[top_n:]
+        top = candidates[:top_n]
+        rest = candidates[top_n:]
+        add_shown_tweets([str(t["id"]) for t, _ in top], chat_id)
+        return top, rest
 
     # Build age-aware topic string (most recent topics listed first with weight hint)
     now = _now_ist()
@@ -296,11 +333,15 @@ Candidates:
                     break
 
         rest = [(t, s) for t, s in candidates if str(t["id"]) not in {str(x["id"]) for x, _ in top}]
+        add_shown_tweets([str(x["id"]) for x, _ in top], chat_id)
         return top, rest
 
     except Exception as e:
         print(f"[!] Semantic curation failed: {e}. Falling back to global order.")
-        return candidates[:top_n], candidates[top_n:]
+        top = candidates[:top_n]
+        rest = candidates[top_n:]
+        add_shown_tweets([str(t["id"]) for t, _ in top], chat_id)
+        return top, rest
 
 
 # ─────────────────────────────────────────────────────────────

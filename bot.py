@@ -69,6 +69,7 @@ from rank_and_notify import (
     curate_feed_locally,
     load_preferences,
     save_preferences,
+    add_shown_tweets,
 )
 
 load_dotenv()
@@ -449,6 +450,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.sleep(0.3)
 
     context.user_data["more_offset"] = offset + len(batch)
+    add_shown_tweets([str(t["id"]) for t, _ in batch], str(chat_id))
     remaining = len(more_pool) - context.user_data["more_offset"]
     log.info(f"More batch sent (offset {offset}→{context.user_data['more_offset']}) to chat_id={chat_id}. {remaining} left.")
 
@@ -504,7 +506,13 @@ async def cmd_liked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_clear_liked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear all user preferences."""
     chat_id = update.effective_chat.id
-    save_preferences({"liked_topics": [], "liked_tweets": []}, str(chat_id))
+    save_preferences({
+        "liked_topics": [],
+        "liked_tweets": [],
+        "disliked_topics": [],
+        "disliked_tweets": [],
+        "shown_tweets": []
+    }, str(chat_id))
     await update.message.reply_text(
         "✅ All preferences cleared. Future digests will be unfiltered again.",
         parse_mode="HTML",
