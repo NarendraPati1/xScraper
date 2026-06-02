@@ -40,6 +40,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
     LinkPreviewOptions,
 )
@@ -56,9 +57,10 @@ from google import genai
 from google.genai import types
 
 # ── local modules ──────────────────────────────────────────
-from scraper import main as run_scraper
+from scraper import main as run_scraper, scrape_custom_query
 from rank_and_notify import (
     rank_with_gemini,
+    rank_search_with_gemini,
     format_message,
     format_header,
     summarize_tweets,
@@ -70,6 +72,8 @@ from rank_and_notify import (
     load_preferences,
     save_preferences,
     add_shown_tweets,
+    add_alert_topic,
+    remove_alert_topic,
 )
 
 load_dotenv()
@@ -213,6 +217,78 @@ async def background_scraper_loop(application: Application) -> None:
                     _global_more_summaries = {str(t["id"]): s for t, s in ranked}
                     log.info(f"Background Scraper: Done — {len(ranked)} ranked, {len(_global_more_summaries)} summaries cached.")
                     success = True
+
+                    # ── Direct User Alert Checks (Live Search & Alert) ──
+                    from pathlib import Path
+                    import re
+                    log.info("Background Scraper: Starting direct alert notifications check...")
+                    for pref_path in Path(".").glob("user_preferences_*.json"):
+                        match = re.match(r"user_preferences_(\d+)\.json", pref_path.name)
+                        if not match:
+                            continue
+                        user_chat_id = match.group(1)
+                        try:
+                            user_prefs = load_preferences(user_chat_id)
+                            alert_topics = user_prefs.get("alert_topics", [])
+                            if not alert_topics:
+                                continue
+                            
+                            log.info(f"Checking alert subscriptions for user {user_chat_id} on topics: {alert_topics}")
+                            for topic in alert_topics:
+                                try:
+                                    # Scrape X live for this specific topic
+                                    scraped_tweets = await scrape_custom_query(topic, count=10, verbose=False)
+                                    if not scraped_tweets:
+                                        continue
+                                    
+                                    # Filter out already alerted tweets
+                                    alerted_ids = set(user_prefs.get("alerted_tweets", []))
+                                    new_tweets = [t for t in scraped_tweets if str(t["id"]) not in alerted_ids]
+                                    if not new_tweets:
+                                        continue
+                                    
+                                    # Rank/summarize with Gemini
+                                    matches = await asyncio.to_thread(rank_search_with_gemini, new_tweets, topic, 3)
+                                    if not matches:
+                                        continue
+                                    
+                                    # Send header
+                                    await application.bot.send_message(
+                                        chat_id=user_chat_id,
+                                        text=f"🔔 <b>Direct Update: {html.escape(topic)}</b>",
+                                        parse_mode="HTML"
+                                    )
+                                    
+                                    # Save to cache so Likes buttons work
+                                    save_tweets_cache([t for t, _ in matches])
+                                    
+                                    # Send tweets
+                                    for rank, (tweet, summary) in enumerate(matches, 1):
+                                        already_liked = _is_already_liked(tweet["id"], user_chat_id)
+                                        already_disliked = _is_already_disliked(tweet["id"], user_chat_id)
+                                        await application.bot.send_message(
+                                            chat_id=user_chat_id,
+                                            text=format_message(rank, tweet, summary),
+                                            parse_mode="HTML",
+                                            link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
+                                            reply_markup=_action_buttons(tweet["id"], already_liked, already_disliked),
+                                        )
+                                        await asyncio.sleep(0.3)
+                                    
+                                    # Add to alerted list
+                                    new_alerted_ids = list(alerted_ids) + [str(t["id"]) for t, _ in matches]
+                                    if len(new_alerted_ids) > 100:
+                                        new_alerted_ids = new_alerted_ids[-100:]
+                                    user_prefs["alerted_tweets"] = new_alerted_ids
+                                    save_preferences(user_prefs, user_chat_id)
+                                    
+                                except Exception as alert_exc:
+                                    log.error(f"Error checking alert for '{topic}' / user {user_chat_id}: {alert_exc}")
+                                
+                                # Gentle sleep between topics to avoid rate limits
+                                await asyncio.sleep(3)
+                        except Exception as pref_exc:
+                            log.error(f"Could not check alerts for user {user_chat_id}: {pref_exc}")
                 else:
                     log.warning("Background Scraper: Gemini global ranking returned empty list.")
             else:
@@ -272,9 +348,10 @@ def _is_already_disliked(tweet_id: str, chat_id: str) -> bool:
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Get AI Digest"), KeyboardButton("More")],
+        [KeyboardButton("Update me about 🔔"), KeyboardButton("Active Alerts 📋")],
     ],
     resize_keyboard=True,
-    input_field_placeholder="Tap to get today's AI digest",
+    input_field_placeholder="Tap to manage digests and alerts",
 )
 
 
@@ -727,7 +804,7 @@ async def cmd_unlike(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/search <term> — semantic search across the pre-ranked global pool via Gemini."""
+    """/search <term> — live-scrape X/Twitter for the term, with fallback to local cached search."""
     chat_id = update.effective_chat.id
     term = " ".join(context.args or []).strip()
 
@@ -735,26 +812,59 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Usage: /search &lt;topic&gt;\nExample: /search diffusion model", parse_mode="HTML")
         return
 
-    if not _global_ranked_results:
-        await update.message.reply_text("Feed not loaded yet. Tap <b>Get AI Digest</b> first.", parse_mode="HTML")
-        return
-
-    # ── Semantic Search via Gemini ───────────────────────────
-    api_key = os.getenv("GEMINI_API_KEY")
+    live_success = False
     matches = []
-    if api_key:
+
+    status_msg = await update.message.reply_text(
+        f"🔍 Searching X/Twitter live for \"<b>{html.escape(term)}</b>\"...\nThis might take a few seconds.",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Run custom search scrape on X
+        tweets = await scrape_custom_query(term, count=15, verbose=False)
+        if tweets:
+            # Save scraped tweets to the cache so liking them later works
+            save_tweets_cache(tweets)
+            # Rank and summarize with Gemini
+            matches = await asyncio.to_thread(rank_search_with_gemini, tweets, term, 5)
+            if matches:
+                live_success = True
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warning(f"Live search scraping failed: {exc}. Falling back to cached search.")
         try:
-            # Build candidates list
-            candidate_lines = []
-            tweets_map = {}
-            for t, s in _global_ranked_results:
-                tid = str(t["id"])
-                tweets_map[tid] = (t, s)
-                short = (" ".join(s.split()))[:200]
-                candidate_lines.append(f"ID:{tid} | {short}")
-            
-            candidates_block = "\n".join(candidate_lines)
-            prompt = f"""You are a search engine for an AI news feed.
+            await status_msg.edit_text(
+                f"⚠️ Live search failed. Falling back to searching locally cached feed...",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    # Fallback to local cached search if live search failed or returned nothing
+    if not live_success:
+        if not _global_ranked_results:
+            await update.message.reply_text("No cached feed available to search. Tap <b>Get AI Digest</b> first.", parse_mode="HTML")
+            return
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        matches = []
+        if api_key:
+            try:
+                # Build candidates list
+                candidate_lines = []
+                tweets_map = {}
+                for t, s in _global_ranked_results:
+                    tid = str(t["id"])
+                    tweets_map[tid] = (t, s)
+                    short = (" ".join(s.split()))[:200]
+                    candidate_lines.append(f"ID:{tid} | {short}")
+                
+                candidates_block = "\n".join(candidate_lines)
+                prompt = f"""You are a search engine for an AI news feed.
 The user is searching for: "{term}"
 
 Below are {len(_global_ranked_results)} pre-curated AI news tweets (ID | summary).
@@ -767,47 +877,58 @@ Return ONLY a JSON array of up to 5 matching objects, ordered from most to least
 Candidates:
 {candidates_block}
 """
-            client = genai.Client(api_key=api_key)
-            response = await client.aio.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
-            )
-            import re as _re
-            raw = (response.text or "").strip()
-            raw = _re.sub(r"^```[a-z]*\n?", "", raw).rstrip("` \n")
-            matched_ids = json.loads(raw)
-            
-            seen = set()
-            for item in matched_ids:
-                tid = str(item.get("id", "")).strip()
-                if tid in tweets_map and tid not in seen:
-                    matches.append(tweets_map[tid])
-                    seen.add(tid)
+                client = genai.Client(api_key=api_key)
+                response = await client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+                import re as _re
+                raw = (response.text or "").strip()
+                raw = _re.sub(r"^```[a-z]*\n?", "", raw).rstrip("` \n")
+                matched_ids = json.loads(raw)
+                
+                seen = set()
+                for item in matched_ids:
+                    tid = str(item.get("id", "")).strip()
+                    if tid in tweets_map and tid not in seen:
+                        matches.append(tweets_map[tid])
+                        seen.add(tid)
+                    if len(matches) >= 5:
+                        break
+            except Exception as e:
+                log.warning(f"Semantic search failed: {e}. Falling back to keyword search.")
+                matches = []
+
+        # Fallback to keyword search if semantic search found nothing / failed
+        if not matches:
+            term_lower = term.lower()
+            words = [w for w in term_lower.split() if len(w) > 1]
+            for tweet, summary in _global_ranked_results:
+                content = (tweet.get("text", "") + " " + summary).lower()
+                if any(w in content for w in words):
+                    matches.append((tweet, summary))
                 if len(matches) >= 5:
                     break
-        except Exception as e:
-            log.warning(f"Semantic search failed: {e}. Falling back to keyword search.")
-            matches = []
 
-    # Fallback to keyword search if semantic search found nothing / failed
-    if not matches:
-        term_lower = term.lower()
-        words = [w for w in term_lower.split() if len(w) > 1]
-        for tweet, summary in _global_ranked_results:
-            content = (tweet.get("text", "") + " " + summary).lower()
-            if any(w in content for w in words):
-                matches.append((tweet, summary))
-            if len(matches) >= 5:
-                break
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
     if not matches:
-        await update.message.reply_text(f"No results found for \"<b>{html.escape(term)}</b>\" in the current feed.", parse_mode="HTML")
+        await update.message.reply_text(f"No results found for \"<b>{html.escape(term)}</b>\".", parse_mode="HTML")
         return
+
+    header_text = f"<b>🔍 Search results for \"{html.escape(term)}\"</b>"
+    if live_success:
+        header_text += " (Live from X)"
+    else:
+        header_text += " (Cached Feed)"
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"<b>🔍 Search results for \"{html.escape(term)}\"</b>",
+        text=header_text,
         parse_mode="HTML",
     )
     for rank, (tweet, summary) in enumerate(matches, 1):
@@ -823,16 +944,86 @@ Candidates:
         await asyncio.sleep(0.3)
 
 
+async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's active direct alerts."""
+    chat_id = update.effective_chat.id
+    prefs = load_preferences(str(chat_id))
+    alert_topics = prefs.get("alert_topics", [])
+
+    if not alert_topics:
+        await update.message.reply_text(
+            "You don't have any active alerts set up yet.\n\n"
+            "Tap <b>Update me about 🔔</b> to create one.",
+            parse_mode="HTML",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    lines = ["🔔 <b>Your Active Alerts</b>\n"]
+    for idx, topic in enumerate(alert_topics, 1):
+        lines.append(f"{idx}. <b>{html.escape(topic)}</b>")
+    lines.append("\nUse `/unalert &lt;topic&gt;` to stop tracking a topic.")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=MAIN_KEYBOARD)
+
+
+async def cmd_unalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a topic from active alerts."""
+    chat_id = update.effective_chat.id
+    topic = " ".join(context.args or []).strip()
+
+    if not topic:
+        await update.message.reply_text("Usage: /unalert &lt;topic&gt;\nExample: /unalert Claude Code", parse_mode="HTML")
+        return
+
+    if remove_alert_topic(topic, str(chat_id)):
+        await update.message.reply_text(
+            f"✅ Stopped alerts for \"<b>{html.escape(topic)}</b>\".",
+            parse_mode="HTML",
+            reply_markup=MAIN_KEYBOARD
+        )
+    else:
+        await update.message.reply_text(
+            f"No active alert found for \"<b>{html.escape(topic)}</b>\".\n\nUse /alerts to see your active list.",
+            parse_mode="HTML"
+        )
+
+
 # ─────────────────────────────────────────────────────────────
 # TEXT BUTTON HANDLER
 # ─────────────────────────────────────────────────────────────
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (update.message.text or "").strip().lower()
-    if text == "get ai digest":
+    text = (update.message.text or "").strip()
+    text_lower = text.lower()
+
+    # Cancel alert topic waiting if they click a main button or run a command
+    if text_lower in {"get ai digest", "more", "update me about 🔔", "active alerts 📋"} or text.startswith("/"):
+        context.user_data["waiting_for_alert_topic"] = False
+
+    if context.user_data.get("waiting_for_alert_topic"):
+        context.user_data["waiting_for_alert_topic"] = False
+        chat_id = update.effective_chat.id
+        add_alert_topic(text, str(chat_id))
+        await update.message.reply_text(
+            f"🔔 Saved! You will now receive direct updates whenever anything related to \"<b>{html.escape(text)}</b>\" is posted on X.",
+            parse_mode="HTML",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    if text_lower == "get ai digest":
         await cmd_update(update, context)
-    elif text == "more":
+    elif text_lower == "more":
         await cmd_more(update, context)
+    elif text_lower == "update me about 🔔":
+        context.user_data["waiting_for_alert_topic"] = True
+        await update.message.reply_text(
+            "Please send the topic or keyword you want to receive direct alerts for (e.g. <code>Claude Code</code> or <code>Devin agent</code>):",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    elif text_lower == "active alerts 📋":
+        await cmd_alerts(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -867,6 +1058,8 @@ def main() -> None:
     app.add_handler(CommandHandler("clear_liked", cmd_clear_liked))
     app.add_handler(CommandHandler("unlike",      cmd_unlike))
     app.add_handler(CommandHandler("search",      cmd_search))
+    app.add_handler(CommandHandler("alerts",      cmd_alerts))
+    app.add_handler(CommandHandler("unalert",     cmd_unalert))
 
     # Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_like,       pattern=r"^like_"))

@@ -207,7 +207,7 @@ SEARCH_QUERIES = [
 # Minimum engagement to filter noise
 MIN_FAVORITES = 20
 MAX_TWEETS_PER_QUERY = 10   # twikit max is 20 per call
-RECENT_DAYS = int(os.getenv("RECENT_DAYS", "21"))
+RECENT_DAYS = int(os.getenv("RECENT_DAYS", "3"))
 SAVE_TWEETS_JSON = os.getenv("SAVE_TWEETS_JSON", "0").lower() in {"1", "true", "yes"}
 
 AI_KEYWORDS = {
@@ -308,6 +308,42 @@ def print_tweet_summary(tweet: dict, index: int) -> None:
     print(f"\n[{index}] @{tweet['author']}  -  {tweet['created']}")
     print(f"    {tweet['text'][:200]}{'...' if len(tweet['text']) > 200 else ''}")
     print(f"    {tweet['url']}")
+
+
+async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True) -> list[dict]:
+    """Scrape tweets for a custom search query from X."""
+    client = Client("en-US")
+    if os.path.exists(COOKIES_FILE):
+        if verbose:
+            print(f"[+] Loading saved cookies from {COOKIES_FILE}")
+        client.load_cookies(COOKIES_FILE)
+    else:
+        raise RuntimeError(
+            "No cookies.json found. Cannot login from a server IP (Cloudflare blocks it). "
+            "Run scraper.py locally to generate cookies.json, then scp it to the server."
+        )
+
+    if verbose:
+        print(f"[+] Searching X for custom query: '{query}'")
+
+    try:
+        results = await client.search_tweet(query, "Latest", count=count)
+    except Exception as e:
+        if verbose:
+            print(f"[!] Custom search failed: {e}")
+        raise e
+
+    tweets_list = []
+    for tweet in results:
+        t = format_tweet(tweet)
+        # Filter: Custom search can look back 7 days to provide a slightly broader search scope.
+        if is_recent(t, days=7) and is_english(t):
+            tweets_list.append(t)
+
+    if verbose:
+        print(f"[+] Found {len(tweets_list)} unique matching tweets after filtering.")
+
+    return tweets_list
 
 
 # ─────────────────────────────────────────────

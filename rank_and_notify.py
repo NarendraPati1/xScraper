@@ -60,10 +60,20 @@ def load_preferences(chat_id: str | None = None) -> dict:
                 data.setdefault("disliked_topics", [])
                 data.setdefault("disliked_tweets", [])
                 data.setdefault("shown_tweets", [])
+                data.setdefault("alert_topics", [])
+                data.setdefault("alerted_tweets", [])
                 return data
         except Exception:
             pass
-    return {"liked_topics": [], "liked_tweets": [], "disliked_topics": [], "disliked_tweets": [], "shown_tweets": []}
+    return {
+        "liked_topics": [],
+        "liked_tweets": [],
+        "disliked_topics": [],
+        "disliked_tweets": [],
+        "shown_tweets": [],
+        "alert_topics": [],
+        "alerted_tweets": [],
+    }
 
 
 def save_preferences(prefs: dict, chat_id: str | None = None) -> None:
@@ -75,6 +85,28 @@ def save_preferences(prefs: dict, chat_id: str | None = None) -> None:
             json.dump(prefs, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[!] Could not save preferences: {e}")
+
+
+def add_alert_topic(topic: str, chat_id: str | None = None) -> None:
+    """Add a topic to alert preferences."""
+    prefs = load_preferences(chat_id)
+    prefs.setdefault("alert_topics", [])
+    topic_clean = topic.strip()
+    if topic_clean and topic_clean not in prefs["alert_topics"]:
+        prefs["alert_topics"].append(topic_clean)
+        save_preferences(prefs, chat_id)
+
+
+def remove_alert_topic(topic: str, chat_id: str | None = None) -> bool:
+    """Remove a topic from alert preferences."""
+    prefs = load_preferences(chat_id)
+    prefs.setdefault("alert_topics", [])
+    topic_clean = topic.strip()
+    if topic_clean in prefs["alert_topics"]:
+        prefs["alert_topics"].remove(topic_clean)
+        save_preferences(prefs, chat_id)
+        return True
+    return False
 
 
 def add_shown_tweets(tweet_ids: list[str], chat_id: str | None = None) -> None:
@@ -508,6 +540,67 @@ Candidate tweets:
     except Exception as e:
         print(f"[!] Error ranking with Gemini: {e}")
         return [(t, t["text"]) for t in tweets[:count]]
+
+
+def rank_search_with_gemini(tweets: list[dict], query: str, count: int = 5) -> list[tuple[dict, str]]:
+    """Rank and summarize search results specifically for a search query using Gemini."""
+    if not tweets:
+        return []
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return [(t, t["text"]) for t in tweets[:count]]
+
+    client = genai.Client(api_key=api_key)
+    candidates = tweets[:30]  # Limit candidates to avoid huge prompt
+    tweets_text = "\n".join(_candidate_payload(t) for t in candidates)
+
+    prompt = f"""
+You are ranking and summarizing search results from X/Twitter for the user's search query: "{query}"
+
+Select the top {count} tweets that are the most relevant and high-quality updates/news regarding the search query.
+
+For each selected tweet, write a short, Telegram-friendly summary in strict English. Keep it concise, factual, and easy to scan. No hype.
+
+Candidate tweets:
+{tweets_text}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=RankingResponse,
+            ),
+        )
+        
+        data = json.loads(response.text)
+        ranked_list = []
+        tweets_map = {str(t["id"]): t for t in tweets}
+        
+        for rt in data.get("top_tweets", []):
+            tweet_id_str = str(rt.get("id")).strip()
+            summary = " ".join(rt.get("summary", "").split())
+            if tweet_id_str in tweets_map:
+                ranked_list.append((tweets_map[tweet_id_str], summary))
+            else:
+                # Fallback matching
+                for tid, t in tweets_map.items():
+                    if tweet_id_str in tid or tid in tweet_id_str:
+                        ranked_list.append((t, summary))
+                        break
+        
+        if not ranked_list:
+            return [(t, t["text"]) for t in tweets[:count]]
+            
+        return ranked_list[:count]
+
+    except Exception as e:
+        print(f"[!] Error ranking search with Gemini: {e}")
+        return [(t, t["text"]) for t in tweets[:count]]
+
 
 def summarize_tweets(tweets: list[dict], chat_id: str | None = None) -> dict[str, str]:
     """Generate concise, scanable, factual English summaries for each input tweet using Gemini.
