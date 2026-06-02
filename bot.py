@@ -444,7 +444,11 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         top, more_pool = await curate_feed_locally(_global_ranked_results, str(chat_id))
 
         if not top:
-            await context.bot.send_message(chat_id=chat_id, text="Curation failed. Try again later.")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="No new tweets have been posted in the last 30 minutes. Check back later! 🕒",
+                reply_markup=MAIN_KEYBOARD
+            )
             return
 
         _user_caches[str(chat_id)] = {"results": top, "more_pool": more_pool, "at": datetime.now()}
