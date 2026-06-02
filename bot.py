@@ -823,17 +823,19 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         # Run custom search scrape on X
         tweets = await scrape_custom_query(term, count=15, verbose=False)
+        # The X search succeeded, so we treat it as a live_success (no fallback to cached feed)
+        live_success = True
+        
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
         if tweets:
             # Save scraped tweets to the cache so liking them later works
             save_tweets_cache(tweets)
             # Rank and summarize with Gemini
             matches = await asyncio.to_thread(rank_search_with_gemini, tweets, term, 5)
-            if matches:
-                live_success = True
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
     except Exception as exc:
         log.warning(f"Live search scraping failed: {exc}. Falling back to cached search.")
         try:
