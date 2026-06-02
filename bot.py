@@ -242,9 +242,23 @@ async def background_scraper_loop(application: Application) -> None:
                                     if not scraped_tweets:
                                         continue
                                     
-                                    # Filter out already alerted tweets
+                                    # Filter out already alerted tweets and keep only tweets posted in the last 35 minutes
+                                    from email.utils import parsedate_to_datetime
                                     alerted_ids = set(user_prefs.get("alerted_tweets", []))
-                                    new_tweets = [t for t in scraped_tweets if str(t["id"]) not in alerted_ids]
+                                    now_utc = datetime.now(timezone.utc)
+                                    
+                                    def _is_alert_recent(tweet: dict) -> bool:
+                                        try:
+                                            created = parsedate_to_datetime(tweet.get("created", ""))
+                                            # Keep only tweets created in the last 35 minutes (to align with 30-min background interval)
+                                            return (now_utc - created).total_seconds() <= 2100
+                                        except Exception:
+                                            return False
+                                            
+                                    new_tweets = [
+                                        t for t in scraped_tweets 
+                                        if str(t["id"]) not in alerted_ids and _is_alert_recent(t)
+                                    ]
                                     if not new_tweets:
                                         continue
                                     

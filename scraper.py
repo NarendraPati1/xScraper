@@ -277,11 +277,11 @@ def created_datetime(tweet: dict) -> datetime | None:
         return None
 
 
-def is_recent(tweet: dict, minutes: int = 30) -> bool:
+def is_recent(tweet: dict, days: int = RECENT_DAYS) -> bool:
     created = created_datetime(tweet)
     if created is None:
         return True
-    return (datetime.now(timezone.utc) - created).total_seconds() <= (minutes * 60)
+    return (datetime.now(timezone.utc) - created).days <= days
 
 
 def is_english(tweet: dict) -> bool:
