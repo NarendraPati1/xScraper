@@ -311,7 +311,7 @@ def print_tweet_summary(tweet: dict, index: int) -> None:
 
 
 async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True) -> list[dict]:
-    """Scrape tweets for a custom search query from X."""
+    """Scrape tweets for a custom search query from X. No filtering applied — returns raw X results."""
     client = Client("en-US")
     if os.path.exists(COOKIES_FILE):
         if verbose:
@@ -334,14 +334,16 @@ async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True)
         raise e
 
     tweets_list = []
+    seen_ids = set()
     for tweet in results:
         t = format_tweet(tweet)
-        # Filter: Custom search can look back 7 days to provide a slightly broader search scope.
-        if is_recent(t, days=7) and is_english(t):
+        tid = str(t["id"])
+        if tid not in seen_ids:
+            seen_ids.add(tid)
             tweets_list.append(t)
 
     if verbose:
-        print(f"[+] Found {len(tweets_list)} unique matching tweets after filtering.")
+        print(f"[+] Found {len(tweets_list)} tweets for query '{query}'.")
 
     return tweets_list
 
