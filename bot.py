@@ -62,6 +62,7 @@ from rank_and_notify import (
     rank_with_gemini,
     rank_search_with_gemini,
     format_message,
+    format_search_message,
     format_header,
     summarize_tweets,
     extract_topic_with_gemini,
@@ -938,7 +939,7 @@ Candidates:
         already_disliked = _is_already_disliked(tweet["id"], str(chat_id))
         await context.bot.send_message(
             chat_id=chat_id,
-            text=format_message(rank, tweet, summary),
+            text=format_search_message(rank, tweet, summary),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(url=tweet["preview_url"]),
             reply_markup=_action_buttons(tweet["id"], already_liked, already_disliked),

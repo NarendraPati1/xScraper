@@ -311,7 +311,10 @@ def print_tweet_summary(tweet: dict, index: int) -> None:
 
 
 async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True) -> list[dict]:
-    """Scrape tweets for a custom search query from X. No filtering applied — returns raw X results."""
+    """Scrape tweets for a custom user search query from X using 'Top' results.
+    Top mode returns the most relevant/engaged posts for the query.
+    No AI/recency/language filtering applied — returns raw X results with deduplication only.
+    """
     client = Client("en-US")
     if os.path.exists(COOKIES_FILE):
         if verbose:
@@ -324,10 +327,10 @@ async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True)
         )
 
     if verbose:
-        print(f"[+] Searching X for custom query: '{query}'")
+        print(f"[+] Searching X (Top) for: '{query}'")
 
     try:
-        results = await client.search_tweet(query, "Latest", count=count)
+        results = await client.search_tweet(query, "Top", count=count)
     except Exception as e:
         if verbose:
             print(f"[!] Custom search failed: {e}")
@@ -343,9 +346,10 @@ async def scrape_custom_query(query: str, count: int = 15, verbose: bool = True)
             tweets_list.append(t)
 
     if verbose:
-        print(f"[+] Found {len(tweets_list)} tweets for query '{query}'.")
+        print(f"[+] Found {len(tweets_list)} tweets.")
 
     return tweets_list
+
 
 
 # ─────────────────────────────────────────────

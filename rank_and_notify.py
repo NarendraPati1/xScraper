@@ -716,6 +716,27 @@ def format_message(rank: int, tweet: dict, summary: str) -> str:
     return f"<b>{rank}.</b>  @{author}\n{clean}\n\n{url}"
 
 
+def format_search_message(rank: int, tweet: dict, summary: str) -> str:
+    """Like format_message but includes the tweet timestamp so users can judge recency."""
+    author = tweet["author"]
+    url    = tweet["url"]
+    clean  = html.escape(html.unescape(" ".join((summary or "").split())))
+
+    # Parse the timestamp and show it in a friendly format
+    time_str = ""
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(tweet.get("created", ""))
+        # Convert to IST
+        IST_tz = timezone(timedelta(hours=5, minutes=30))
+        dt_ist = dt.astimezone(IST_tz)
+        time_str = f" · {dt_ist.strftime('%d %b %Y, %I:%M %p IST')}"
+    except Exception:
+        pass
+
+    return f"<b>{rank}.</b>  @{author}<i>{time_str}</i>\n{clean}\n\n{url}"
+
+
 def format_header() -> str:
     today = _now_ist().strftime("%d %b %Y, %I:%M %p IST")
     return f"<b>AI News Digest</b>  —  {today}"
