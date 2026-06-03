@@ -251,15 +251,17 @@ def format_tweet(tweet) -> dict:
                 preview_url = f"https://twitter.com/{quoted_author}/status/{quote_obj.id}"
 
     return {
-        "id":          source.id,
-        "author":      source.user.screen_name,
-        "text":        text,
-        "likes":       source.favorite_count,
-        "retweets":    source.retweet_count,
-        "created":     source.created_at,
-        "url":         f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
-        "preview_url": preview_url,
+        "id":             source.id,
+        "author":         source.user.screen_name,
+        "text":           text,
+        "likes":          source.favorite_count,
+        "retweets":       source.retweet_count,
+        "created":        source.created_at,
+        "url":            f"https://twitter.com/{source.user.screen_name}/status/{source.id}",
+        "preview_url":    preview_url,
+        "quoted_created": getattr(quote_obj, "created_at", None) if (is_quote and quote_obj) else None,
     }
+
 
 
 def print_tweet(t: dict, index: int):

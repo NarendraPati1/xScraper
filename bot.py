@@ -251,7 +251,17 @@ async def background_scraper_loop(application: Application) -> None:
                                         try:
                                             created = parsedate_to_datetime(tweet.get("created", ""))
                                             # Keep only tweets created in the last 35 minutes (to align with 30-min background interval)
-                                            return (now_utc - created).total_seconds() <= 2100
+                                            if (now_utc - created).total_seconds() > 2100:
+                                                return False
+                                            
+                                            # If it's a quote tweet, the quoted tweet itself must also be recent
+                                            quoted_created_str = tweet.get("quoted_created")
+                                            if quoted_created_str:
+                                                quoted_created = parsedate_to_datetime(quoted_created_str)
+                                                if (now_utc - quoted_created).total_seconds() > 2100:
+                                                    return False
+                                            
+                                            return True
                                         except Exception:
                                             return False
                                             
